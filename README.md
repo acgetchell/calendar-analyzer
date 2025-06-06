@@ -1,5 +1,9 @@
 # Calendar Analyzer
 
+[![CodeQL Advanced](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml)
+[![Pylint](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml)
+[![Bandit](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml)
+
 A simple Python script that analyzes your Apple Calendar data and provides a summary of your meetings.
 
 ## Features
