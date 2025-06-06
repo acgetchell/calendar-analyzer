@@ -286,8 +286,7 @@ def generate_summary(meetings, stats):
 
     # Add most common meeting times
     time_counts = df['time'].value_counts().head()
-    for time, count in time_counts.items():
-        summary.append(f"- {time.strftime('%I:%M %p')}: {count} meetings")
+    summary.extend(f"- {time.strftime('%I:%M %p')}: {count} meetings" for time, count in time_counts.items())
 
     # Add top 50 most frequent meeting titles
     summary.extend([
