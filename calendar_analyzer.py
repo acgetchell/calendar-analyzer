@@ -318,6 +318,9 @@ def main():
         '--titles', type=int, default=50,
         help='Number of meeting titles to display (default: 50)'
     )
+    parser.add_argument(
+        '--output', help='Path to save the analysis summary (default: print to console)'
+    )
     args = parser.parse_args()
 
     # Parse dates if provided
@@ -352,9 +355,20 @@ def main():
     # Analyze calendar
     meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
 
-    # Generate and print summary
+    # Generate summary
     summary = generate_summary(meetings, stats, args.titles)
-    print("\n" + summary)
+
+    # Output summary
+    if args.output:
+        try:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(summary)
+            print(f"\nAnalysis saved to: {args.output}")
+        except OSError as e:
+            print(f"Error saving to file: {e}")
+            sys.exit(1)
+    else:
+        print("\n" + summary)
 
 
 if __name__ == "__main__":

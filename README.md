@@ -103,11 +103,17 @@ Control the number of meeting titles displayed:
 python calendar_analyzer.py --titles 10  # Show only top 10 meeting titles
 ```
 
+Save the analysis to a file:
+
+```bash
+python calendar_analyzer.py --output analysis.txt  # Save results to analysis.txt
+```
+
 The script will automatically:
 
 1. Find your most recent calendar file (unless specified)
 2. Analyze meetings from the specified date range
-3. Display a summary of the findings
+3. Display a summary of the findings (or save to file if --output is specified)
 
 ## Development
 

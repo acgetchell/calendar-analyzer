@@ -15,6 +15,7 @@
         "pycache",
         "pylint",
         "pytest",
+        "sdist",
         "sqlite",
         "sqlitedb",
         "timezone",
