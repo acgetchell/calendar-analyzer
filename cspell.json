@@ -1,0 +1,32 @@
+{
+    "version": "0.2",
+    "language": "en",
+    "words": [
+        "astral",
+        "calendars",
+        "cspell",
+        "dateutil",
+        "datetime",
+        "dtstart",
+        "gettz",
+        "icbu",
+        "icalendar",
+        "pycache",
+        "pytest",
+        "sqlite",
+        "sqlitedb",
+        "timezone",
+        "uv",
+        "venv",
+        "VEVENT"
+    ],
+    "ignorePaths": [
+        ".git/**",
+        ".venv/**",
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.pytest_cache/**",
+        "**/__pycache__/**"
+    ]
+} 

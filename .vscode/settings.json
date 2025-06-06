@@ -1,0 +1,25 @@
+{
+    "cSpell.enabled": true,
+    "cSpell.enableFiletypes": [
+        "markdown",
+        "python",
+        "plaintext"
+    ],
+    "cSpell.ignorePaths": [
+        ".git/**",
+        ".venv/**",
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.pytest_cache/**",
+        "**/__pycache__/**"
+    ],
+    "cSpell.customDictionaries": {
+        "project-words": {
+            "name": "project-words",
+            "path": "${workspaceFolder}/cspell.json",
+            "description": "Words used in this project",
+            "addWords": true
+        }
+    }
+} 
