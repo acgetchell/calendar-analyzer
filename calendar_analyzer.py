@@ -103,11 +103,27 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
             return analyze_sqlite_calendar(calendar_path, start_date, end_date)
         elif calendar_path.suffix.lower() == '.icbu':
             # .icbu files are actually directories containing calendar data
-            calendar_data_path = calendar_path / 'calendar.ics'
-            if not calendar_data_path.exists():
-                print(f"Error: Could not find calendar data in {calendar_path}")
+            # Look for SQLite database first, then fall back to ICS files
+            sqlite_db_path = calendar_path / 'Calendar.sqlitedb'
+            if sqlite_db_path.exists():
+                print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
+                return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date)
+            
+            # Look for ICS files as fallback
+            ics_files = list(calendar_path.glob('*.ics'))
+            if ics_files:
+                calendar_path = ics_files[0]  # Use the first ICS file found
+                print(f"Found ICS file in ICBU backup: {calendar_path}")
+            else:
+                print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
+                # List what's actually in the directory to help debug
+                print("Contents of ICBU directory:")
+                try:
+                    for item in calendar_path.iterdir():
+                        print(f"  - {item.name}")
+                except Exception as e:
+                    print(f"  Error listing directory contents: {e}")
                 sys.exit(1)
-            calendar_path = calendar_data_path
             
         with open(calendar_path, 'rb') as f:
             cal = Calendar.from_ical(f.read())
