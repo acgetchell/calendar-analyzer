@@ -107,21 +107,13 @@ The script will automatically:
 
 ### Code Quality
 
-This project uses [pylint](https://pylint.org/) for code quality checks. To use it:
+This project uses [pylint](https://pylint.org/) for code quality checks. Pylint is already installed via `requirements.txt`. To use it:
 
-1. Install pylint:
+```bash
+pylint calendar_analyzer.py
+```
 
-   ```bash
-   pip install pylint
-   ```
-
-2. Run pylint:
-
-   ```bash
-   pylint calendar_analyzer.py
-   ```
-
-The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 8.5/10.
+The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 9.0/10.
 
 ### Spell Checking
 
