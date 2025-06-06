@@ -118,8 +118,7 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
                 return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date)
 
             # Look for ICS files as fallback
-            ics_files = list(calendar_path.glob('*.ics'))
-            if ics_files:
+            if ics_files := list(calendar_path.glob('*.ics')):
                 calendar_path = ics_files[0]  # Use the first ICS file found
                 print(f"Found ICS file in ICBU backup: {calendar_path}")
             else:

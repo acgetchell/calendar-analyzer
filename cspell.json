@@ -10,6 +10,7 @@
         "dtstart",
         "gettz",
         "icbu",
+        "ical",
         "icalendar",
         "pycache",
         "pylint",
