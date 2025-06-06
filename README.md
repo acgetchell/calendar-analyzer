@@ -113,7 +113,7 @@ This project uses [pylint](https://pylint.org/) for code quality checks. Pylint 
 pylint calendar_analyzer.py
 ```
 
-The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 9.0/10.
+The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 8.9/10.
 
 ### Spell Checking
 
