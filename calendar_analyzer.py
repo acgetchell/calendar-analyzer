@@ -27,6 +27,16 @@ def convert_to_pacific(dt):
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(PACIFIC)
 
+def print_calendar_export_instructions():
+    """Print instructions for exporting a calendar file."""
+    print("\nPlease export your calendar from the Calendar app:")
+    print("1. Open the Calendar app")
+    print("2. Select the calendar(s) you want to analyze")
+    print("3. Go to File > Export")
+    print("4. Save the calendar file")
+    print("\nThen run this script with the path to your exported file:")
+    print("python calendar_analyzer.py --calendar /path/to/your/calendar.ics")
+
 def get_calendar_path(calendar_file=None):
     """Get the path to the calendar file."""
     if calendar_file:
@@ -85,13 +95,7 @@ def get_calendar_path(calendar_file=None):
 
     if not all_calendar_files:
         print("\nError: No calendar files found in any of the expected locations.")
-        print("\nPlease export your calendar from the Calendar app:")
-        print("1. Open the Calendar app")
-        print("2. Select the calendar(s) you want to analyze")
-        print("3. Go to File > Export")
-        print("4. Save the calendar file")
-        print("\nThen run this script with the path to your exported file:")
-        print("python calendar_analyzer.py --calendar /path/to/your/calendar.ics")
+        print_calendar_export_instructions()
         sys.exit(1)
 
     # Get the most recent calendar file
