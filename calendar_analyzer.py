@@ -240,7 +240,7 @@ def analyze_sqlite_calendar(calendar_path, start_date=None, end_date=None):
         print(f"Error reading SQLite calendar: {e}")
         sys.exit(1)
 
-def generate_summary(meetings, stats):
+def generate_summary(meetings, stats, num_titles=50):
     """Generate a summary of the calendar analysis."""
     if not meetings:
         return "No meetings found in the specified time period."
@@ -287,14 +287,14 @@ def generate_summary(meetings, stats):
     time_counts = df['time'].value_counts().head()
     summary.extend(f"- {time.strftime('%I:%M %p')}: {count} meetings" for time, count in time_counts.items())
 
-    # Add top 50 most frequent meeting titles
+    # Add most frequent meeting titles
     summary.extend([
-        "\nTop 50 Most Frequent Meeting Titles:",
+        f"\nTop {num_titles} Most Frequent Meeting Titles:",
         "-" * 30
     ])
 
     # Get meeting title frequencies and sort
-    title_counts = df['summary'].value_counts().head(50)
+    title_counts = df['summary'].value_counts().head(num_titles)
     for title, count in title_counts.items():
         # Truncate long titles to keep the output readable
         display_title = title[:100] + "..." if len(title) > 100 else title
@@ -313,6 +313,10 @@ def main():
     parser.add_argument(
         '--days', type=int, default=365, 
         help='Number of days to look back from end date (default: 365)'
+    )
+    parser.add_argument(
+        '--titles', type=int, default=50,
+        help='Number of meeting titles to display (default: 50)'
     )
     args = parser.parse_args()
 
@@ -349,7 +353,7 @@ def main():
     meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
 
     # Generate and print summary
-    summary = generate_summary(meetings, stats)
+    summary = generate_summary(meetings, stats, args.titles)
     print("\n" + summary)
 
 

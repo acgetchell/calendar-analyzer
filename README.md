@@ -97,6 +97,12 @@ Specify a custom calendar file:
 python calendar_analyzer.py --calendar /path/to/your/calendar.ics
 ```
 
+Control the number of meeting titles displayed:
+
+```bash
+python calendar_analyzer.py --titles 10  # Show only top 10 meeting titles
+```
+
 The script will automatically:
 
 1. Find your most recent calendar file (unless specified)
