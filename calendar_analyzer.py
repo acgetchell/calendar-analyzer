@@ -330,6 +330,13 @@ def main():
             print("Error: End date must be in YYYY-MM-DD format")
             sys.exit(1)
 
+    # Validate date range if both dates are provided
+    if start_date and end_date and end_date < start_date:
+        print("Error: End date cannot be before start date")
+        print(f"Start date: {start_date.strftime('%Y-%m-%d')}")
+        print(f"End date: {end_date.strftime('%Y-%m-%d')}")
+        sys.exit(1)
+
     print("📊 Analyzing your calendar...")
 
     # Get calendar path
