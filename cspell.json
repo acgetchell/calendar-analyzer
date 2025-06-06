@@ -12,6 +12,7 @@
         "icbu",
         "icalendar",
         "pycache",
+        "pylint",
         "pytest",
         "sqlite",
         "sqlitedb",
