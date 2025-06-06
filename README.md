@@ -127,6 +127,21 @@ pylint calendar_analyzer.py
 
 The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 8.9/10.
 
+### Dependency Management
+
+This project uses [Dependabot](https://dependabot.com/) to automatically check for dependency updates. Dependabot:
+
+- Monitors `requirements.txt` for outdated packages
+- Creates pull requests for dependency updates
+- Groups updates together to minimize PR noise
+- Runs weekly to check for new versions
+
+When Dependabot creates a pull request:
+1. Review the changes
+2. Check the changelog/release notes for breaking changes
+3. Run the test suite to ensure compatibility
+4. Merge if everything looks good
+
 ### Spell Checking
 
 This project uses [cspell](https://cspell.org/) for spell checking. To use it:

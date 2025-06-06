@@ -1,6 +1,22 @@
 version: 2
 updates:
-  - package-ecosystem: "github-actions"
+  # Enable version updates for Python
+  - package-ecosystem: "pip"
+    # Look for requirements.txt in the root directory
     directory: "/"
+    # Check for updates once a week
     schedule:
       interval: "weekly"
+    # Specify labels for pull requests for version updates
+    labels:
+      - "dependencies"
+      - "python"
+    # Set version update strategy
+    versioning-strategy: auto
+    # Allow up to 10 open pull requests for version updates
+    open-pull-requests-limit: 10
+    # Group all updates together
+    groups:
+      dependencies:
+        patterns:
+          - "*"
