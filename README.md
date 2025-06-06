@@ -48,39 +48,22 @@ pip install uv
    uv pip install -r requirements.txt
    ```
 
-## Development
+## Exporting Your Calendar
 
-### Spell Checking
+To analyze your calendar, you'll need to export it first:
 
-This project uses [cspell](https://cspell.org/) for spell checking. To use it:
+1. Open the Calendar app on your Mac
+2. Select the calendar(s) you want to analyze
+3. Go to File > Export
+4. Choose your Documents folder as the save location
+5. Save the file (it will be saved as a `.ics` file)
+6. Run the analyzer with the path to your exported file:
 
-1. Install cspell:
    ```bash
-   npm install -g cspell
+   python calendar_analyzer.py --calendar ~/Documents/your-calendar.ics
    ```
 
-2. Run spell check:
-   ```bash
-   cspell "**/*.{md,py,txt}"
-   ```
-
-The spell check configuration is in `cspell.json`. Add any project-specific words to the `words` array in this file.
-
-#### Cursor Integration
-
-The project includes cspell integration for Cursor (and VS Code). To enable it:
-
-1. Install the "Code Spell Checker" extension in Cursor
-2. The project's `.vscode/settings.json` file is already configured to:
-   - Enable spell checking for Markdown, Python, and text files
-   - Use the project's `cspell.json` as a custom dictionary
-   - Allow adding new words to the dictionary
-   - Ignore common build and cache directories
-
-You can add new words to the dictionary by:
-1. Right-clicking on a misspelled word
-2. Selecting "Add to Dictionary"
-3. Choosing "project-words" as the dictionary
+The script will automatically look in your Documents folder, but you can specify any location where you've saved your calendar export.
 
 ## Usage
 
@@ -115,6 +98,43 @@ The script will automatically:
 1. Find your most recent calendar file (unless specified)
 2. Analyze meetings from the specified date range
 3. Display a summary of the findings
+
+## Development
+
+### Spell Checking
+
+This project uses [cspell](https://cspell.org/) for spell checking. To use it:
+
+1. Install cspell:
+
+   ```bash
+   npm install -g cspell
+   ```
+
+2. Run spell check:
+
+   ```bash
+   cspell "**/*.{md,py,txt}"
+   ```
+
+The spell check configuration is in `cspell.json`. Add any project-specific words to the `words` array in this file.
+
+#### Cursor Integration
+
+The project includes cspell integration for Cursor (and VS Code). To enable it:
+
+1. Install the "Code Spell Checker" extension in Cursor
+2. The project's `.vscode/settings.json` file is already configured to:
+   - Enable spell checking for Markdown, Python, and text files
+   - Use the project's `cspell.json` as a custom dictionary
+   - Allow adding new words to the dictionary
+   - Ignore common build and cache directories
+
+You can add new words to the dictionary by:
+
+1. Right-clicking on a misspelled word
+2. Selecting "Add to Dictionary"
+3. Choosing "project-words" as the dictionary
 
 ## Note
 
