@@ -1,16 +1,17 @@
 # Calendar Analyzer
 
-A simple Python script that analyzes your Apple Calendar data from the past year and provides a summary of your meetings.
+A simple Python script that analyzes your Apple Calendar data and provides a summary of your meetings.
 
 ## Features
 
-- Analyzes calendar events from the past year
+- Analyzes calendar events from a specified date range (defaults to past year)
 - Provides statistics on:
   - Total number of meetings
   - Total meeting hours
   - Average meetings per day
   - Average meeting duration
   - Most common meeting times
+  - Most frequent meeting titles
 
 ## Setup
 
@@ -31,13 +32,30 @@ A simple Python script that analyzes your Apple Calendar data from the past year
 ## Usage
 
 Make sure your virtual environment is activated, then run the script:
+
+Basic usage (analyzes past year):
 ```bash
 python calendar_analyzer.py
 ```
 
+Analyze a specific date range:
+```bash
+python calendar_analyzer.py --start-date 2024-01-01 --end-date 2024-03-31
+```
+
+Customize the number of days to look back:
+```bash
+python calendar_analyzer.py --days 90  # Analyze last 90 days
+```
+
+Specify a custom calendar file:
+```bash
+python calendar_analyzer.py --calendar /path/to/your/calendar.ics
+```
+
 The script will automatically:
-1. Find your most recent calendar file
-2. Analyze meetings from the past year
+1. Find your most recent calendar file (unless specified)
+2. Analyze meetings from the specified date range
 3. Display a summary of the findings
 
 ## Note
