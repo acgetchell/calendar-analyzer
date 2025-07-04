@@ -46,10 +46,14 @@ pip install uv
    source .venv/bin/activate  # On macOS/Linux
    ```
 
-3. Install the required dependencies using uv:
+3. Install the project dependencies:
 
    ```bash
-   uv pip install -r requirements.txt
+   # Install main dependencies only (for using the tool)
+   uv sync
+   
+   # Install with development dependencies (for contributing)
+   uv sync --group dev
    ```
 
 ## Exporting Your Calendar
@@ -119,7 +123,7 @@ The script will automatically:
 
 ### Code Quality
 
-This project uses [pylint](https://pylint.org/) for code quality checks. Pylint is already installed via `requirements.txt`. To use it:
+This project uses [pylint](https://pylint.org/) for code quality checks. Pylint is automatically installed as a development dependency. To use it:
 
 ```bash
 pylint calendar_analyzer.py
@@ -129,14 +133,38 @@ The project's GitHub Actions workflow automatically runs pylint on all Python fi
 
 ### Dependency Management
 
-This project uses [Dependabot](https://dependabot.com/) to automatically check for dependency updates. Dependabot:
+This project uses `uv` for fast and reliable dependency management with `pyproject.toml`. Dependencies are organized into:
 
-- Monitors `requirements.txt` for outdated packages
-- Creates pull requests for dependency updates
-- Groups updates together to minimize PR noise
-- Runs weekly to check for new versions
+- **Main dependencies**: Required for running the application (`icalendar`, `pandas`, `python-dateutil`)
+- **Development dependencies**: Tools for development and testing (`pylint`, `isort`)
+
+To add new dependencies:
+
+```bash
+# Add a main dependency
+uv add package-name
+
+# Add a development dependency
+uv add --group dev package-name
+```
+
+To update dependencies:
+
+```bash
+# Update all dependencies (including dev dependencies)
+uv sync --group dev
+
+# Update main dependencies only
+uv sync
+
+# Update a specific package
+uv add package-name@latest
+```
+
+[Dependabot](https://dependabot.com/) automatically monitors `pyproject.toml` for outdated packages and creates pull requests for dependency updates.
 
 When Dependabot creates a pull request:
+
 1. Review the changes
 2. Check the changelog/release notes for breaking changes
 3. Run the test suite to ensure compatibility

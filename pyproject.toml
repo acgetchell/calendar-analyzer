@@ -1,0 +1,21 @@
+[project]
+name = "calendar-analyzer"
+version = "0.1.0"
+description = "A Python script that analyzes your Apple Calendar data and provides a summary of your meetings"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "icalendar>=6.3.1",
+    "pandas>=2.3.0",
+    "python-dateutil>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pylint>=3.3.7",
+    "isort>=6.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
