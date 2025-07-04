@@ -1,7 +1,7 @@
 # Calendar Analyzer
 
 [![CI](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/github/acgetchell/d-delaunay/graph/badge.svg?token=WT7qZGT9bO)](https://codecov.io/github/acgetchell/d-delaunay)
+[![codecov](https://codecov.io/github/acgetchell/calendar-analyzer/graph/badge.svg?token=UWRe2AcNnm)](https://codecov.io/github/acgetchell/calendar-analyzer)
 [![CodeQL Advanced](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml)
 [![Pylint](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml)
 [![Bandit](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml)
