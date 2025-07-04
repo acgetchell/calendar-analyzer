@@ -20,12 +20,14 @@ from dateutil import tz
 PACIFIC = tz.gettz('America/Los_Angeles')
 UTC = tz.UTC
 
+
 def convert_to_pacific(dt):
     """Convert a datetime to Pacific time."""
     if dt.tzinfo is None:
         # If no timezone info, assume UTC
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(PACIFIC)
+
 
 def print_calendar_export_instructions():
     """Print instructions for exporting a calendar file."""
@@ -36,6 +38,7 @@ def print_calendar_export_instructions():
     print("4. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
     print("python calendar_analyzer.py --calendar /path/to/your/calendar.ics")
+
 
 def get_calendar_path(calendar_file=None):
     """Get the path to the calendar file."""
@@ -103,6 +106,7 @@ def get_calendar_path(calendar_file=None):
     print(f"\nSelected most recent calendar file: {latest_calendar}")
     return latest_calendar
 
+
 def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=365):
     """Analyze calendar events from the specified date range."""
     try:
@@ -114,7 +118,8 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
             # Look for SQLite database first, then fall back to ICS files
             sqlite_db_path = calendar_path / 'Calendar.sqlitedb'
             if sqlite_db_path.exists():
-                print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
+                print(
+                    f"Found SQLite database in ICBU backup: {sqlite_db_path}")
                 return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date)
 
             # Look for ICS files as fallback
@@ -122,7 +127,8 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
                 calendar_path = ics_files[0]  # Use the first ICS file found
                 print(f"Found ICS file in ICBU backup: {calendar_path}")
             else:
-                print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
+                print(
+                    f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
                 # List what's actually in the directory to help debug
                 print("Contents of ICBU directory:")
                 try:
@@ -175,6 +181,7 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
     except OSError as e:
         print(f"Error reading calendar file: {e}")
         sys.exit(1)
+
 
 def analyze_sqlite_calendar(calendar_path, start_date=None, end_date=None):
     """Analyze calendar events from a SQLite database."""
@@ -240,6 +247,7 @@ def analyze_sqlite_calendar(calendar_path, start_date=None, end_date=None):
         print(f"Error reading SQLite calendar: {e}")
         sys.exit(1)
 
+
 def generate_summary(meetings, stats, num_titles=50):
     """Generate a summary of the calendar analysis."""
     if not meetings:
@@ -285,7 +293,8 @@ def generate_summary(meetings, stats, num_titles=50):
 
     # Add most common meeting times
     time_counts = df['time'].value_counts().head()
-    summary.extend(f"- {time.strftime('%I:%M %p')}: {count} meetings" for time, count in time_counts.items())
+    summary.extend(
+        f"- {time.strftime('%I:%M %p')}: {count} meetings" for time, count in time_counts.items())
 
     # Add most frequent meeting titles
     summary.extend([
@@ -302,16 +311,20 @@ def generate_summary(meetings, stats, num_titles=50):
 
     return "\n".join(summary)
 
+
 def main():
     """Main function to run the calendar analyzer."""
     parser = argparse.ArgumentParser(
         description='Analyze calendar events from a specified date range.'
     )
-    parser.add_argument('--calendar', help='Path to the exported calendar file (.ics)')
-    parser.add_argument('--start-date', help='Start date for analysis (YYYY-MM-DD)')
-    parser.add_argument('--end-date', help='End date for analysis (YYYY-MM-DD)')
     parser.add_argument(
-        '--days', type=int, default=365, 
+        '--calendar', help='Path to the exported calendar file (.ics)')
+    parser.add_argument(
+        '--start-date', help='Start date for analysis (YYYY-MM-DD)')
+    parser.add_argument(
+        '--end-date', help='End date for analysis (YYYY-MM-DD)')
+    parser.add_argument(
+        '--days', type=int, default=365,
         help='Number of days to look back from end date (default: 365)'
     )
     parser.add_argument(
@@ -328,13 +341,15 @@ def main():
     end_date = None
     if args.start_date:
         try:
-            start_date = datetime.strptime(args.start_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
+            start_date = datetime.strptime(
+                args.start_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
         except ValueError:
             print("Error: Start date must be in YYYY-MM-DD format")
             sys.exit(1)
     if args.end_date:
         try:
-            end_date = datetime.strptime(args.end_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
+            end_date = datetime.strptime(
+                args.end_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
         except ValueError:
             print("Error: End date must be in YYYY-MM-DD format")
             sys.exit(1)
@@ -353,7 +368,8 @@ def main():
     print(f"Found calendar at: {calendar_path}")
 
     # Analyze calendar
-    meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
+    meetings, stats = analyze_calendar(
+        calendar_path, start_date, end_date, args.days)
 
     # Generate summary
     summary = generate_summary(meetings, stats, args.titles)

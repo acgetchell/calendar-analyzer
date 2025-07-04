@@ -9,6 +9,7 @@
         "dateutil",
         "dtstart",
         "gettz",
+        "Getchell",
         "ical",
         "icalendar",
         "icbu",

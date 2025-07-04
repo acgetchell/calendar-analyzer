@@ -1,10 +1,9 @@
 version: 2
 updates:
-  # Enable version updates for Python using uv
-  - package-ecosystem: "uv"
+  # Enable version updates for Python using pip
+  - package-ecosystem: "pip"
     # Look for pyproject.toml in the root directory
     directory: "/"
-    manifest: "pyproject.toml"
     # Check for updates once a week
     schedule:
       interval: "weekly"

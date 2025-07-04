@@ -35,7 +35,7 @@ pip install uv
 
 ## Setup
 
-1. Make sure you have Python 3.7+ installed
+1. Make sure you have Python 3.9+ installed
 2. Create and activate a virtual environment:
 
    ```bash
