@@ -1,5 +1,6 @@
 # Calendar Analyzer
 
+[![CI](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml)
 [![CodeQL Advanced](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml)
 [![Pylint](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml)
 [![Bandit](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml)
@@ -130,6 +131,45 @@ pylint calendar_analyzer.py
 ```
 
 The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 8.9/10.
+
+### Testing
+
+This project uses [pytest](https://pytest.org/) for testing. To run the tests:
+
+1. Make sure you have the development dependencies installed:
+
+   ```bash
+   uv sync --group dev
+   ```
+
+2. Run all tests:
+
+   ```bash
+   pytest
+   ```
+
+3. Run tests with verbose output:
+
+   ```bash
+   pytest -v
+   ```
+
+4. Run a specific test file:
+
+   ```bash
+   pytest tests/test_calendar_analyzer.py
+   ```
+
+5. Run a specific test function:
+
+   ```bash
+   pytest tests/test_calendar_analyzer.py::test_analyze_mock_ics
+   ```
+
+The test suite includes:
+- Unit tests for calendar parsing and analysis functions
+- Mock calendar data to ensure consistent test results
+- Validation of output format and statistics calculations
 
 ### Dependency Management
 

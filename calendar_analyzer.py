@@ -159,9 +159,21 @@ def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=36
                 start = convert_to_pacific(start)
                 if start_date <= start <= end_date:
                     summary = str(event.get('summary', 'No Title'))
-                    duration = event.get('duration', timedelta(hours=1))
-                    if isinstance(duration, timedelta):
-                        duration_hours = duration.total_seconds() / 3600
+                    duration = event.get('duration')
+                    if duration is not None:
+                        if isinstance(duration, timedelta):
+                            duration_hours = duration.total_seconds() / 3600
+                        else:
+                            # Handle icalendar duration objects
+                            try:
+                                duration_hours = duration.dt.total_seconds() / 3600
+                            except AttributeError:
+                                # Fall back to parsing duration string
+                                duration_str = str(duration)
+                                if duration_str.startswith('PT') and duration_str.endswith('H'):
+                                    duration_hours = float(duration_str[2:-1])
+                                else:
+                                    duration_hours = 1
                     else:
                         duration_hours = 1
 
