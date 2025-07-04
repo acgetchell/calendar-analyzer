@@ -54,9 +54,15 @@ def test_analyze_mock_ics(monkeypatch, capsys):
 
 def test_invalid_start_date_format(monkeypatch, capsys):
     """Test that invalid start date format causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    import tempfile
+    dummy_file = tempfile.NamedTemporaryFile(suffix=".ics", delete=False)
+    dummy_path = dummy_file.name
+    dummy_file.close()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "invalid-date"
     ])
 
@@ -70,9 +76,15 @@ def test_invalid_start_date_format(monkeypatch, capsys):
 
 def test_invalid_end_date_format(monkeypatch, capsys):
     """Test that invalid end date format causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    import tempfile
+    dummy_file = tempfile.NamedTemporaryFile(suffix=".ics", delete=False)
+    dummy_path = dummy_file.name
+    dummy_file.close()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--end-date", "2023/01/01"
     ])
 
@@ -86,9 +98,15 @@ def test_invalid_end_date_format(monkeypatch, capsys):
 
 def test_end_date_before_start_date(monkeypatch, capsys):
     """Test that end date before start date causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    import tempfile
+    dummy_file = tempfile.NamedTemporaryFile(suffix=".ics", delete=False)
+    dummy_path = dummy_file.name
+    dummy_file.close()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "2023-07-01",
         "--end-date", "2023-06-30"
     ])
@@ -138,9 +156,18 @@ def test_valid_date_formats(monkeypatch, capsys):
 def test_edge_case_dates(monkeypatch, capsys):
     """Test edge case date formats."""
     # Test leap year date
+    # Create a temporary dummy file path that doesn't exist
+    import tempfile
+    dummy_file = tempfile.NamedTemporaryFile(suffix=".ics", delete=False)
+    dummy_path = dummy_file.name
+    dummy_file.close()
+    # Remove the file to make it nonexistent (for this test)
+    import os
+    os.unlink(dummy_path)
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "2024-02-29"  # Valid leap year date
     ])
 
@@ -148,9 +175,15 @@ def test_edge_case_dates(monkeypatch, capsys):
         calendar_analyzer.main()
 
     # Test invalid leap year date
+    dummy_file2 = tempfile.NamedTemporaryFile(suffix=".ics", delete=False)
+    dummy_path2 = dummy_file2.name
+    dummy_file2.close()
+    # Remove this file too since we want to test date validation, not file reading
+    os.unlink(dummy_path2)
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path2,
         "--start-date", "2023-02-29"  # Invalid - 2023 is not a leap year
     ])
 
@@ -443,7 +476,15 @@ def test_get_calendar_path_with_directory(capsys):
 
 def test_get_calendar_path_nonexistent_file(capsys):
     """Test get_calendar_path with a nonexistent file."""
-    nonexistent_path = "/tmp/nonexistent_calendar.ics"
+    # Use a more secure temporary path that doesn't exist
+    import tempfile
+    nonexistent_file = tempfile.NamedTemporaryFile(
+        suffix="_nonexistent.ics", delete=False)
+    nonexistent_path = nonexistent_file.name
+    nonexistent_file.close()
+    # Remove the file to make it nonexistent but keep the secure path
+    import os
+    os.unlink(nonexistent_path)
 
     result = calendar_analyzer.get_calendar_path(nonexistent_path)
 

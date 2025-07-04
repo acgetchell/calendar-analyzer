@@ -168,9 +168,48 @@ This project uses [pytest](https://pytest.org/) for testing. To run the tests:
    ```
 
 The test suite includes:
+
 - Unit tests for calendar parsing and analysis functions
 - Mock calendar data to ensure consistent test results
 - Validation of output format and statistics calculations
+
+### Security Scanning
+
+This project uses [Bandit](https://bandit.readthedocs.io/) for security vulnerability scanning. Bandit is automatically installed as a development dependency.
+
+1. Make sure you have the development dependencies installed:
+
+   ```bash
+   uv sync --group dev
+   ```
+
+2. Run security scan on the main application:
+
+   ```bash
+   bandit -r calendar_analyzer.py
+   ```
+
+3. Run security scan on test files (skipping assert warnings):
+
+   ```bash
+   bandit -r tests/ --skip B101
+   ```
+
+4. Run security scan on all Python files:
+
+   ```bash
+   bandit -r . --exclude tests/
+   ```
+
+The project's GitHub Actions workflow automatically runs Bandit security scans on all code. The configuration in `pyproject.toml` skips B101 (assert_used) warnings for test files since assertions are expected and appropriate in tests.
+
+**Security Features:**
+
+- No hardcoded secrets or credentials
+- Secure temporary file handling
+- Input validation for date formats
+- Safe file operations with proper error handling
+- No external network requests (local processing only)
 
 ### Dependency Management
 

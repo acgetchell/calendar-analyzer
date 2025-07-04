@@ -26,7 +26,12 @@ dev = [
     "isort>=6.0.1",
     "pytest>=8.2.1",
     "pytest-cov>=6.2.1",
+    "bandit>=1.8.5",
 ]
+
+[tool.bandit]
+# Skip assert_used (B101) warnings in test files since assertions are expected in tests
+skips = ["B101"]
 
 [build-system]
 requires = ["hatchling"]
