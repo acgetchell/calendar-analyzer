@@ -10,7 +10,7 @@ dependencies = [
     "python-dateutil>=2.9.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pylint>=3.3.7",
     "isort>=6.0.1",

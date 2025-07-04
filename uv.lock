@@ -23,20 +23,30 @@ wheels = [
 [[package]]
 name = "calendar-analyzer"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "icalendar" },
     { name = "pandas" },
-    { name = "pylint" },
     { name = "python-dateutil" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "isort" },
+    { name = "pylint" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "icalendar", specifier = "==6.3.1" },
-    { name = "pandas", specifier = "==2.3.0" },
+    { name = "icalendar", specifier = ">=6.3.1" },
+    { name = "pandas", specifier = ">=2.3.0" },
+    { name = "python-dateutil", specifier = ">=2.9.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "isort", specifier = ">=6.0.1" },
     { name = "pylint", specifier = ">=3.3.7" },
-    { name = "python-dateutil", specifier = "==2.9.0.post0" },
 ]
 
 [[package]]

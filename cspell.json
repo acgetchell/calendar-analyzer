@@ -5,15 +5,17 @@
         "astral",
         "calendars",
         "cspell",
-        "dateutil",
         "datetime",
+        "dateutil",
         "dtstart",
         "gettz",
-        "icbu",
         "ical",
         "icalendar",
+        "icbu",
+        "isort",
         "pycache",
         "pylint",
+        "pyproject",
         "pytest",
         "sdist",
         "sqlite",
@@ -32,4 +34,4 @@
         "**/.pytest_cache/**",
         "**/__pycache__/**"
     ]
-} 
+}
