@@ -37,4 +37,5 @@ ENV/
 # Project specific
 *.txt
 *.log
-analysis.txt 
+analysis.txt
+.coverage 

@@ -4,10 +4,12 @@
     "words": [
         "astral",
         "calendars",
+        "capsys",
         "cspell",
         "datetime",
         "dateutil",
         "dtstart",
+        "DTEND",
         "gettz",
         "Getchell",
         "ical",
@@ -24,6 +26,7 @@
         "timezone",
         "uv",
         "venv",
+        "VCALENDAR",
         "VEVENT"
     ],
     "ignorePaths": [
