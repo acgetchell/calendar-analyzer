@@ -21,269 +21,143 @@ A simple Python script that analyzes your Apple Calendar data and provides a sum
 
 ## Prerequisites
 
-This project uses `uv`, a fast Python package installer and resolver. Install it using one of these methods:
-
-### Using curl (macOS/Linux)
+This project uses `uv`, a fast Python package installer and resolver. Install it using:
 
 ```bash
+# Homebrew (recommended for macOS)
+brew install uv
+
+# Official installer
 curl -LsSf https://astral.sh/uv/install.sh | sh
-```
 
-### Using pip
-
-```bash
+# Using pip
 pip install uv
 ```
 
 ## Setup
 
-1. Make sure you have Python 3.9+ installed
-2. Create and activate a virtual environment:
+1. **Ensure Python 3.9+ is installed**
+2. **Create and activate a virtual environment:**
 
    ```bash
-   # Create a new virtual environment
    uv venv
-   
-   # Activate the virtual environment
    source .venv/bin/activate  # On macOS/Linux
    ```
 
-3. Install the project dependencies:
+3. **Install dependencies:**
 
    ```bash
-   # Install main dependencies only (for using the tool)
+   # Main dependencies only
    uv sync
    
-   # Install with development dependencies (for contributing)
+   # With development dependencies (for contributing)
    uv sync --group dev
    ```
 
 ## Exporting Your Calendar
 
-To analyze your calendar, you'll need to export it first:
-
 1. Open the Calendar app on your Mac
 2. Select the calendar(s) you want to analyze
-3. Go to File > Export
-4. Choose your Documents folder as the save location
-5. Save the file (it will be saved as a `.ics` file)
-6. Run the analyzer with the path to your exported file:
+3. Go to File > Export and save as `.ics` file to your Documents folder
+4. Run the analyzer:
 
    ```bash
    python calendar_analyzer.py --calendar ~/Documents/your-calendar.ics
    ```
 
-The script will automatically look in your Documents folder, but you can specify any location where you've saved your calendar export.
-
 ## Usage
 
-Make sure your virtual environment is activated, then run the script:
-
-Basic usage (analyzes past year):
+Activate your virtual environment and run:
 
 ```bash
+# Basic usage (analyzes past year)
 python calendar_analyzer.py
-```
 
-Analyze a specific date range:
-
-```bash
+# Analyze specific date range
 python calendar_analyzer.py --start-date 2024-01-01 --end-date 2024-03-31
-```
 
-Customize the number of days to look back:
+# Analyze last 90 days
+python calendar_analyzer.py --days 90
 
-```bash
-python calendar_analyzer.py --days 90  # Analyze last 90 days
-```
-
-Specify a custom calendar file:
-
-```bash
+# Specify custom calendar file
 python calendar_analyzer.py --calendar /path/to/your/calendar.ics
+
+# Show top 10 meeting titles
+python calendar_analyzer.py --titles 10
+
+# Save results to file
+python calendar_analyzer.py --output analysis.txt
 ```
 
-Control the number of meeting titles displayed:
-
-```bash
-python calendar_analyzer.py --titles 10  # Show only top 10 meeting titles
-```
-
-Save the analysis to a file:
-
-```bash
-python calendar_analyzer.py --output analysis.txt  # Save results to analysis.txt
-```
-
-The script will automatically:
-
-1. Find your most recent calendar file (unless specified)
-2. Analyze meetings from the specified date range
-3. Display a summary of the findings (or save to file if --output is specified)
+The script automatically finds your most recent calendar file (unless specified), analyzes the date range, and displays or saves results.
 
 ## Development
 
 ### Code Quality
 
-This project uses [pylint](https://pylint.org/) for code quality checks. Pylint is automatically installed as a development dependency. To use it:
+Uses [pylint](https://pylint.org/) with minimum score 8.9/10:
 
 ```bash
 pylint calendar_analyzer.py
 ```
 
-The project's GitHub Actions workflow automatically runs pylint on all Python files with a minimum score requirement of 8.9/10.
-
 ### Testing
 
-This project uses [pytest](https://pytest.org/) for testing. To run the tests:
+Uses [pytest](https://pytest.org/):
 
-1. Make sure you have the development dependencies installed:
+```bash
+# Run all tests
+pytest
 
-   ```bash
-   uv sync --group dev
-   ```
+# Verbose output
+pytest -v
 
-2. Run all tests:
-
-   ```bash
-   pytest
-   ```
-
-3. Run tests with verbose output:
-
-   ```bash
-   pytest -v
-   ```
-
-4. Run a specific test file:
-
-   ```bash
-   pytest tests/test_calendar_analyzer.py
-   ```
-
-5. Run a specific test function:
-
-   ```bash
-   pytest tests/test_calendar_analyzer.py::test_analyze_mock_ics
-   ```
-
-The test suite includes:
-
-- Unit tests for calendar parsing and analysis functions
-- Mock calendar data to ensure consistent test results
-- Validation of output format and statistics calculations
+# Specific test file or function
+pytest tests/test_calendar_analyzer.py
+pytest tests/test_calendar_analyzer.py::test_analyze_mock_ics
+```
 
 ### Security Scanning
 
-This project uses [Bandit](https://bandit.readthedocs.io/) for security vulnerability scanning. Bandit is automatically installed as a development dependency.
+Uses [Bandit](https://bandit.readthedocs.io/):
 
-1. Make sure you have the development dependencies installed:
+```bash
+# Scan main application
+bandit -r calendar_analyzer.py
 
-   ```bash
-   uv sync --group dev
-   ```
+# Scan tests (skip assert warnings)
+bandit -r tests/ --skip B101
+```
 
-2. Run security scan on the main application:
-
-   ```bash
-   bandit -r calendar_analyzer.py
-   ```
-
-3. Run security scan on test files (skipping assert warnings):
-
-   ```bash
-   bandit -r tests/ --skip B101
-   ```
-
-4. Run security scan on all Python files:
-
-   ```bash
-   bandit -r . --exclude tests/
-   ```
-
-The project's GitHub Actions workflow automatically runs Bandit security scans on all code. The configuration in `pyproject.toml` skips B101 (assert_used) warnings for test files since assertions are expected and appropriate in tests.
-
-**Security Features:**
-
-- No hardcoded secrets or credentials
-- Secure temporary file handling
-- Input validation for date formats
-- Safe file operations with proper error handling
-- No external network requests (local processing only)
+**Security Features:** No hardcoded secrets, secure file handling, input validation, local processing only.
 
 ### Dependency Management
 
-This project uses `uv` for fast and reliable dependency management with `pyproject.toml`. Dependencies are organized into:
-
-- **Main dependencies**: Required for running the application (`icalendar`, `pandas`, `python-dateutil`)
-- **Development dependencies**: Tools for development and testing (`pylint`, `isort`)
-
-To add new dependencies:
+Uses `uv` with `pyproject.toml`. Dependencies organized as main (runtime) and development (tools).
 
 ```bash
-# Add a main dependency
+# Add dependencies
 uv add package-name
-
-# Add a development dependency
 uv add --group dev package-name
+
+# Update dependencies
+uv sync --group dev  # all
+uv sync              # main only
 ```
 
-To update dependencies:
-
-```bash
-# Update all dependencies (including dev dependencies)
-uv sync --group dev
-
-# Update main dependencies only
-uv sync
-
-# Update a specific package
-uv add package-name@latest
-```
-
-[Dependabot](https://dependabot.com/) automatically monitors `pyproject.toml` for outdated packages and creates pull requests for dependency updates.
-
-When Dependabot creates a pull request:
-
-1. Review the changes
-2. Check the changelog/release notes for breaking changes
-3. Run the test suite to ensure compatibility
-4. Merge if everything looks good
+[Dependabot](https://dependabot.com/) monitors for updates automatically.
 
 ### Spell Checking
 
-This project uses [cspell](https://cspell.org/) for spell checking. To use it:
+Uses [cspell](https://cspell.org/):
 
-1. Install cspell:
+```bash
+# Install and run
+npm install -g cspell
+cspell "**/*.{md,py,txt}"
+```
 
-   ```bash
-   npm install -g cspell
-   ```
-
-2. Run spell check:
-
-   ```bash
-   cspell "**/*.{md,py,txt}"
-   ```
-
-The spell check configuration is in `cspell.json`. Add any project-specific words to the `words` array in this file.
-
-#### Cursor Integration
-
-The project includes cspell integration for Cursor (and VS Code). To enable it:
-
-1. Install the "Code Spell Checker" extension in Cursor
-2. The project's `.vscode/settings.json` file is already configured to:
-   - Enable spell checking for Markdown, Python, and text files
-   - Use the project's `cspell.json` as a custom dictionary
-   - Allow adding new words to the dictionary
-   - Ignore common build and cache directories
-
-You can add new words to the dictionary by:
-
-1. Right-clicking on a misspelled word
-2. Selecting "Add to Dictionary"
-3. Choosing "project-words" as the dictionary
+Configured in `cspell.json`. Includes Cursor/VS Code integration via "Code Spell Checker" extension.
 
 ## Note
 
