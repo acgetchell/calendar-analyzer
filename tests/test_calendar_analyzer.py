@@ -1,16 +1,59 @@
-# test_calendar_analyzer.py
+"""Tests for calendar_analyzer module."""
+
+# Standard library imports
+import os
 import tempfile
 import textwrap
-import pytest
-import os
-from datetime import datetime
-from unittest.mock import patch
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
+
+# Third-party imports
+import pytest
 from dateutil import tz
+
+# Local imports
 import calendar_analyzer
 
 
+def create_temp_ics_file(content, suffix=".ics"):
+    """Helper function to create a temporary ICS file with specified content.
+
+    Args:
+        content (str): The ICS content to write to the file
+        suffix (str): File suffix (default: ".ics")
+
+    Returns:
+        str: Path to the created temporary file
+
+    Note:
+        The caller is responsible for cleaning up the file using os.unlink()
+    """
+    with tempfile.NamedTemporaryFile(suffix=suffix, mode="w+", delete=False) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        return tmp.name
+
+
+def create_temp_dummy_file(suffix=".ics"):
+    """Helper function to create a temporary dummy file path.
+
+    Args:
+        suffix (str): File suffix (default: ".ics")
+
+    Returns:
+        str: Path to the created temporary file
+
+    Note:
+        The caller is responsible for cleaning up the file using os.unlink()
+    """
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as dummy_file:
+        dummy_path = dummy_file.name
+    return dummy_path
+
+
 def test_analyze_mock_ics(monkeypatch, capsys):
+    """Test analyzing a mock ICS calendar file with sample events."""
     # Step 1: Create a mock ICS calendar file
     ics_content = textwrap.dedent("""
     BEGIN:VCALENDAR
@@ -28,35 +71,36 @@ def test_analyze_mock_ics(monkeypatch, capsys):
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        # Step 2: Patch arguments to simulate CLI input
-        monkeypatch.setattr("sys.argv", [
-            "calendar_analyzer.py",
-            "--calendar", tmp.name,
-            "--start-date", "2023-06-30",
-            "--end-date", "2023-07-03",
-            "--titles", "10"
-        ])
+    # Step 2: Patch arguments to simulate CLI input
+    monkeypatch.setattr("sys.argv", [
+        "calendar_analyzer.py",
+        "--calendar", tmp_path,
+        "--start-date", "2023-06-30",
+        "--end-date", "2023-07-03",
+        "--titles", "10"
+    ])
 
-        # Step 3: Run the script
-        calendar_analyzer.main()
+    # Step 3: Run the script
+    calendar_analyzer.main()
 
-        # Step 4: Capture and validate output
-        out = capsys.readouterr().out
-        assert "Test Meeting" in out
-        assert "Project Sync" in out
-        assert "Total Meetings: 2" in out
-        assert "Total Meeting Hours: 3.0" in out
+    # Step 4: Capture and validate output
+    out = capsys.readouterr().out
+    assert "Test Meeting" in out
+    assert "Project Sync" in out
+    assert "Total Meetings: 2" in out
+    assert "Total Meeting Hours: 3.0" in out
 
 
 def test_invalid_start_date_format(monkeypatch, capsys):
     """Test that invalid start date format causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    dummy_path = create_temp_dummy_file()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "invalid-date"
     ])
 
@@ -70,9 +114,12 @@ def test_invalid_start_date_format(monkeypatch, capsys):
 
 def test_invalid_end_date_format(monkeypatch, capsys):
     """Test that invalid end date format causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    dummy_path = create_temp_dummy_file()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--end-date", "2023/01/01"
     ])
 
@@ -86,9 +133,12 @@ def test_invalid_end_date_format(monkeypatch, capsys):
 
 def test_end_date_before_start_date(monkeypatch, capsys):
     """Test that end date before start date causes system exit."""
+    # Create a temporary dummy file path (secure alternative to mktemp)
+    dummy_path = create_temp_dummy_file()
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "2023-07-01",
         "--end-date", "2023-06-30"
     ])
@@ -117,30 +167,33 @@ def test_valid_date_formats(monkeypatch, capsys):
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        monkeypatch.setattr("sys.argv", [
-            "calendar_analyzer.py",
-            "--calendar", tmp.name,
-            "--start-date", "2023-06-30",
-            "--end-date", "2023-07-31"
-        ])
+    monkeypatch.setattr("sys.argv", [
+        "calendar_analyzer.py",
+        "--calendar", tmp_path,
+        "--start-date", "2023-06-30",
+        "--end-date", "2023-07-31"
+    ])
 
-        # Should not raise SystemExit
-        calendar_analyzer.main()
+    # Should not raise SystemExit
+    calendar_analyzer.main()
 
-        out = capsys.readouterr().out
-        assert "Test Meeting" in out
+    out = capsys.readouterr().out
+    assert "Test Meeting" in out
 
 
 def test_edge_case_dates(monkeypatch, capsys):
     """Test edge case date formats."""
     # Test leap year date
+    # Create a temporary dummy file path that doesn't exist
+    dummy_path = create_temp_dummy_file()
+    # Remove the file to make it nonexistent (for this test)
+    os.unlink(dummy_path)
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path,
         "--start-date", "2024-02-29"  # Valid leap year date
     ])
 
@@ -148,9 +201,13 @@ def test_edge_case_dates(monkeypatch, capsys):
         calendar_analyzer.main()
 
     # Test invalid leap year date
+    dummy_path2 = create_temp_dummy_file()
+    # Remove this file too since we want to test date validation, not file reading
+    os.unlink(dummy_path2)
+
     monkeypatch.setattr("sys.argv", [
         "calendar_analyzer.py",
-        "--calendar", "/tmp/dummy.ics",
+        "--calendar", dummy_path2,
         "--start-date", "2023-02-29"  # Invalid - 2023 is not a leap year
     ])
 
@@ -211,35 +268,33 @@ def test_file_output_functionality(monkeypatch, capsys):
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp_ics:
-        tmp_ics.write(ics_content)
-        tmp_ics.flush()
+    tmp_ics_path = create_temp_ics_file(ics_content)
 
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmp_output:
-            output_path = tmp_output.name
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmp_output:
+        output_path = tmp_output.name
 
-        monkeypatch.setattr("sys.argv", [
-            "calendar_analyzer.py",
-            "--calendar", tmp_ics.name,
-            "--start-date", "2023-06-30",
-            "--end-date", "2023-07-03",
-            "--output", output_path
-        ])
+    monkeypatch.setattr("sys.argv", [
+        "calendar_analyzer.py",
+        "--calendar", tmp_ics_path,
+        "--start-date", "2023-06-30",
+        "--end-date", "2023-07-03",
+        "--output", output_path
+    ])
 
-        calendar_analyzer.main()
+    calendar_analyzer.main()
 
-        # Check that file was created and contains expected content
-        with open(output_path, 'r') as f:
-            content = f.read()
-            assert "Test Meeting" in content
-            assert "Calendar Analysis Summary" in content
+    # Check that file was created and contains expected content
+    with open(output_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+        assert "Test Meeting" in content
+        assert "Calendar Analysis Summary" in content
 
-        out = capsys.readouterr().out
-        assert f"Analysis saved to: {output_path}" in out
+    out = capsys.readouterr().out
+    assert f"Analysis saved to: {output_path}" in out
 
-        # Clean up
-        os.unlink(tmp_ics.name)
-        os.unlink(output_path)
+    # Clean up
+    os.unlink(tmp_ics_path)
+    os.unlink(output_path)
 
 
 def test_file_output_error(monkeypatch, capsys):
@@ -255,27 +310,25 @@ def test_file_output_error(monkeypatch, capsys):
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        monkeypatch.setattr("sys.argv", [
-            "calendar_analyzer.py",
-            "--calendar", tmp.name,
-            "--start-date", "2023-06-30",
-            "--end-date", "2023-07-03",
-            "--output", "/invalid/path/output.txt"  # Invalid path
-        ])
+    monkeypatch.setattr("sys.argv", [
+        "calendar_analyzer.py",
+        "--calendar", tmp_path,
+        "--start-date", "2023-06-30",
+        "--end-date", "2023-07-03",
+        "--output", "/invalid/path/output.txt"  # Invalid path
+    ])
 
-        with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.main()
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
 
-        assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Error saving to file:" in out
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error saving to file:" in out
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_calendar_file_read_error(monkeypatch, capsys):
@@ -311,24 +364,21 @@ def test_analyze_calendar_with_different_duration_formats():
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        from pathlib import Path
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            Path(tmp.name),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
-        )
+    _, stats = calendar_analyzer.analyze_calendar(
+        Path(tmp_path),
+        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+    )
 
-        # Should have 2 meetings
-        assert stats['total_meetings'] == 2
-        # First meeting should have some duration, second defaults to 1 hour
-        assert stats['total_hours'] >= 2.0
+    # Should have 2 meetings
+    assert stats['total_meetings'] == 2
+    # First meeting should have some duration, second defaults to 1 hour
+    assert stats['total_hours'] >= 2.0
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_generate_summary_with_long_titles():
@@ -383,31 +433,26 @@ def test_analyze_calendar_date_filtering():
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        from pathlib import Path
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            Path(tmp.name),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC)
-        )
+    meetings, stats = calendar_analyzer.analyze_calendar(
+        Path(tmp_path),
+        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC)
+    )
 
-        # Should only have the meeting in range
-        assert stats['total_meetings'] == 1
-        assert meetings[0]['summary'] == 'In Range'
+    # Should only have the meeting in range
+    assert stats['total_meetings'] == 1
+    assert meetings[0]['summary'] == 'In Range'
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_get_calendar_path_with_specified_file(capsys):
     """Test get_calendar_path when a specific file is provided."""
     # Create a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".ics", delete=False) as tmp:
-        tmp.write(b"test content")
-        tmp_path = tmp.name
+    tmp_path = create_temp_ics_file("test content")
 
     try:
         result = calendar_analyzer.get_calendar_path(tmp_path)
@@ -443,7 +488,10 @@ def test_get_calendar_path_with_directory(capsys):
 
 def test_get_calendar_path_nonexistent_file(capsys):
     """Test get_calendar_path with a nonexistent file."""
-    nonexistent_path = "/tmp/nonexistent_calendar.ics"
+    # Use a more secure temporary path that doesn't exist
+    nonexistent_path = create_temp_dummy_file("_nonexistent.ics")
+    # Remove the file to make it nonexistent but keep the secure path
+    os.unlink(nonexistent_path)
 
     result = calendar_analyzer.get_calendar_path(nonexistent_path)
 
@@ -485,8 +533,7 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys):
         new_calendar.write_text("new calendar content")
 
         # Make old_calendar older by changing its modification time
-        import time
-        old_time = time.time() - 3600  # 1 hour ago
+        old_time = os.path.getmtime(new_calendar) - 3600  # 1 hour ago
         os.utime(old_calendar, (old_time, old_time))
 
         result = calendar_analyzer.get_calendar_path()
@@ -722,28 +769,25 @@ def test_analyze_calendar_icbu_directory_listing_error(capsys):
             assert "Error listing directory contents: Permission denied" in out
 
 
-def test_analyze_calendar_with_malformed_ics(capsys):
+def test_analyze_calendar_with_malformed_ics():
     """Test analyze_calendar with malformed ICS content."""
     malformed_ics = "This is not valid ICS content"
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(malformed_ics)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(malformed_ics)
 
-        # The icalendar library will raise a ValueError, which gets caught as an exception
-        # but not specifically OSError, so it might not trigger our exception handler
-        # Let's test that it raises some kind of exception
-        with pytest.raises((SystemExit, ValueError)):
-            calendar_analyzer.analyze_calendar(Path(tmp.name))
+    # The icalendar library will raise a ValueError, which gets caught as an exception
+    # but not specifically OSError, so it might not trigger our exception handler
+    # Let's test that it raises some kind of exception
+    with pytest.raises((SystemExit, ValueError)):
+        calendar_analyzer.analyze_calendar(Path(tmp_path))
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_analyze_calendar_default_date_range():
     """Test analyze_calendar with default date ranges (no start/end specified)."""
     # Use a recent date that would be within the default 365-day range
-    from datetime import datetime, timedelta
     recent_date = datetime.now() - timedelta(days=30)  # 30 days ago
     recent_date_str = recent_date.strftime('%Y%m%dT%H%M%SZ')
 
@@ -758,22 +802,20 @@ def test_analyze_calendar_default_date_range():
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        # Test with default date range (past 365 days)
-        meetings, stats = calendar_analyzer.analyze_calendar(Path(tmp.name))
+    # Test with default date range (past 365 days)
+    meetings, stats = calendar_analyzer.analyze_calendar(Path(tmp_path))
 
-        # Should process the calendar and find the recent meeting
-        assert isinstance(meetings, list)
-        assert isinstance(stats, dict)
-        assert stats['total_meetings'] == 1
-        assert stats['total_hours'] == 1.0
-        assert meetings[0]['summary'] == 'Recent Meeting'
+    # Should process the calendar and find the recent meeting
+    assert isinstance(meetings, list)
+    assert isinstance(stats, dict)
+    assert stats['total_meetings'] == 1
+    assert stats['total_hours'] == 1.0
+    assert meetings[0]['summary'] == 'Recent Meeting'
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_analyze_calendar_with_non_datetime_events():
@@ -794,22 +836,20 @@ def test_analyze_calendar_with_non_datetime_events():
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            Path(tmp.name),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
-        )
+    meetings, stats = calendar_analyzer.analyze_calendar(
+        Path(tmp_path),
+        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+    )
 
-        # Should only process the datetime event, not the all-day event
-        assert stats['total_meetings'] == 1
-        assert meetings[0]['summary'] == 'Timed Event'
+    # Should only process the datetime event, not the all-day event
+    assert stats['total_meetings'] == 1
+    assert meetings[0]['summary'] == 'Timed Event'
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
 
 
 def test_analyze_calendar_duration_parsing_edge_cases():
@@ -836,24 +876,22 @@ def test_analyze_calendar_duration_parsing_edge_cases():
     END:VCALENDAR
     """)
 
-    with tempfile.NamedTemporaryFile(suffix=".ics", mode="w+", delete=False) as tmp:
-        tmp.write(ics_content)
-        tmp.flush()
+    tmp_path = create_temp_ics_file(ics_content)
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            Path(tmp.name),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
-        )
+    meetings, stats = calendar_analyzer.analyze_calendar(
+        Path(tmp_path),
+        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+    )
 
-        # Should process all events, with fallback durations where needed
-        assert stats['total_meetings'] == 3
+    # Should process all events, with fallback durations where needed
+    assert stats['total_meetings'] == 3
 
-        # Find each meeting and check duration handling
-        meeting_summaries = [m['summary'] for m in meetings]
-        assert '30 Minute Meeting' in meeting_summaries
-        assert 'All Day Event with Duration' in meeting_summaries
-        assert 'Invalid Duration Meeting' in meeting_summaries
+    # Find each meeting and check duration handling
+    meeting_summaries = [m['summary'] for m in meetings]
+    assert '30 Minute Meeting' in meeting_summaries
+    assert 'All Day Event with Duration' in meeting_summaries
+    assert 'Invalid Duration Meeting' in meeting_summaries
 
-        # Clean up
-        os.unlink(tmp.name)
+    # Clean up
+    os.unlink(tmp_path)
