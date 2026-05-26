@@ -7,6 +7,7 @@ import textwrap
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 from unittest.mock import patch
 
 import pytest
@@ -345,6 +346,52 @@ def test_file_output_error(monkeypatch, capsys) -> None:
 
     # Clean up
     Path(tmp_path).unlink()
+
+
+def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
+    """Test failed output replacement preserves existing file content."""
+    ics_content = textwrap.dedent("""
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    BEGIN:VEVENT
+    DTSTART:20230701T100000Z
+    DURATION:PT1H
+    SUMMARY:Test Meeting
+    END:VEVENT
+    END:VCALENDAR
+    """)
+    tmp_ics_path = create_temp_ics_file(ics_content)
+    output_path = Path(create_temp_dummy_file(".txt"))
+    output_path.write_text("existing content", encoding="utf-8")
+
+    def raise_during_write(*_args, **_kwargs) -> NoReturn:
+        message = "simulated write failure"
+        raise OSError(message)
+
+    monkeypatch.setattr("tempfile.NamedTemporaryFile", raise_during_write)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            tmp_ics_path,
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    assert output_path.read_text(encoding="utf-8") == "existing content"
+    assert "Error saving to file: simulated write failure" in capsys.readouterr().out
+    Path(tmp_ics_path).unlink()
+    output_path.unlink()
 
 
 def test_calendar_file_read_error(monkeypatch, capsys) -> None:
@@ -703,7 +750,7 @@ def test_analyze_calendar_icbu_with_sqlite(capsys) -> None:
             result = calendar_analyzer.analyze_calendar(icbu_path)
 
             # Should have called analyze_sqlite_calendar
-            mock_sqlite.assert_called_once_with(sqlite_path, None, None)
+            mock_sqlite.assert_called_once_with(sqlite_path, None, None, calendar_analyzer.DEFAULT_DAYS_BACK)
             assert result == ([], {"total_meetings": 0, "total_hours": 0})
 
             out = capsys.readouterr().out
@@ -737,6 +784,33 @@ def test_analyze_calendar_with_sqlite_file(capsys) -> None:
         assert meetings[0]["summary"] == "SQLite Meeting"
         assert meetings[0]["time"].hour == 10
         assert capsys.readouterr().out == ""
+
+
+def test_analyze_calendar_with_sqlite_file_honors_days_back() -> None:
+    """Test SQLite calendar analysis honors the requested days-back window."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
+        start_dt = datetime(2023, 6, 1, 17, 0, tzinfo=UTC)
+        end_dt = datetime(2023, 6, 1, 18, 0, tzinfo=UTC)
+        start_seconds = int((start_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+        end_seconds = int((end_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+
+        with closing(sqlite3.connect(sqlite_path)) as conn:
+            conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+            conn.execute(
+                "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
+                ("Outside Window", start_seconds, end_seconds),
+            )
+            conn.commit()
+
+        meetings, stats = calendar_analyzer.analyze_calendar(
+            sqlite_path,
+            end_date=datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            days_back=1,
+        )
+
+        assert meetings == []
+        assert stats == {"total_meetings": 0, "total_hours": 0.0}
 
 
 def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:
@@ -893,17 +967,17 @@ def test_analyze_calendar_icbu_directory_listing_error(capsys) -> None:
             assert "Error listing directory contents: Permission denied" in out
 
 
-def test_analyze_calendar_with_malformed_ics() -> None:
+def test_analyze_calendar_with_malformed_ics(capsys) -> None:
     """Test analyze_calendar with malformed ICS content."""
     malformed_ics = "This is not valid ICS content"
 
     tmp_path = create_temp_ics_file(malformed_ics)
 
-    # The icalendar library will raise a ValueError, which gets caught as an exception
-    # but not specifically OSError, so it might not trigger our exception handler
-    # Let's test that it raises some kind of exception
-    with pytest.raises((SystemExit, ValueError)):
+    with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.analyze_calendar(Path(tmp_path))
+
+    assert exc_info.value.code == 1
+    assert "Error parsing calendar file:" in capsys.readouterr().out
 
     # Clean up
     Path(tmp_path).unlink()

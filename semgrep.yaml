@@ -5,6 +5,21 @@
 # CodeQL, Ruff security rules, pip-audit, ShellCheck, and PSScriptAnalyzer.
 
 rules:
+  - id: calendar-analyzer.github-actions.checkout-persist-credentials-false
+    languages:
+      - regex
+    severity: WARNING
+    message: "Set persist-credentials: false on actions/checkout steps."
+    metadata:
+      category: security
+      rationale: "Checkout should not leave GITHUB_TOKEN credentials configured for later workflow steps."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-regex: '(?ms)^\s*(?:-\s*)?uses:\s*actions/checkout@[^\n]+\n(?!(?:\s+[A-Za-z0-9_-]+:.*\n){0,8}\s*persist-credentials:\s*false\b)'
+
   - id: calendar-analyzer.github-actions.external-action-sha-pinned
     languages:
       - regex
@@ -50,6 +65,38 @@ rules:
     patterns:
       - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@[a-fA-F0-9]{40}\s*$'
 
+  - id: calendar-analyzer.github-actions.no-curl-pipe-shell
+    languages:
+      - regex
+    severity: WARNING
+    message: "Download remote installer scripts before execution instead of piping them directly to a shell."
+    metadata:
+      category: security
+      rationale: "Piping network responses into shells makes bootstrap behavior harder to inspect and review."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-either:
+          - pattern-regex: '(?im)^\s*(?!#).*\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash)\b'
+          - pattern-regex: '(?im)^\s*(?!#).*\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n|]*\|\s*(?:Invoke-Expression|iex)\b'
+
+  - id: calendar-analyzer.github-actions.no-pull-request-target
+    languages:
+      - regex
+    severity: WARNING
+    message: "Use pull_request instead of pull_request_target for this repository."
+    metadata:
+      category: security
+      rationale: "pull_request_target runs with base-repository privileges and is unnecessary for this repo's workflows."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-regex: '(?m)^\s*pull_request_target\s*:'
+
   - id: calendar-analyzer.python.sqlite-connect-without-closing
     languages:
       - python
@@ -92,3 +139,20 @@ rules:
       include:
         - "/tests/**/*.py"
     pattern: raise Exception(...)
+
+  - id: calendar-analyzer.scripts.no-curl-pipe-shell
+    languages:
+      - regex
+    severity: WARNING
+    message: "Download remote installer scripts before execution instead of piping them directly to a shell."
+    metadata:
+      category: security
+      rationale: "Piping network responses into shells makes bootstrap behavior harder to inspect and review."
+    paths:
+      include:
+        - "/scripts/**/*.ps1"
+        - "/scripts/**/*.sh"
+    patterns:
+      - pattern-either:
+          - pattern-regex: '(?im)^\s*(?!#).*\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash)\b'
+          - pattern-regex: '(?im)^\s*(?!#).*\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^\n|]*\|\s*(?:Invoke-Expression|iex)\b'

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+import tempfile
 from contextlib import closing
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -85,12 +86,12 @@ def analyze_calendar(
 ) -> CalendarAnalysis:
     """Analyze calendar events from the specified date range."""
     if calendar_path.suffix.lower() == ".sqlitedb":
-        return analyze_sqlite_calendar(calendar_path, start_date, end_date)
+        return analyze_sqlite_calendar(calendar_path, start_date, end_date, days_back)
     if calendar_path.suffix.lower() == ".icbu":
         sqlite_db_path = calendar_path / "Calendar.sqlitedb"
         if sqlite_db_path.exists():
             print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
-            return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date)
+            return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date, days_back)
 
     ics_path = _resolve_ics_calendar_path(calendar_path)
     start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
@@ -100,6 +101,9 @@ def analyze_calendar(
     except OSError as error:
         print(f"Error reading calendar file: {error}")
         raise_system_exit()
+    except ValueError as error:
+        print(f"Error parsing calendar file: {error}")
+        raise_system_exit()
 
     return _analyze_ics_events(calendar, start_date, end_date)
 
@@ -108,9 +112,10 @@ def analyze_sqlite_calendar(
     calendar_path: Path,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    days_back: int = DEFAULT_DAYS_BACK,
 ) -> CalendarAnalysis:
     """Analyze calendar events from a SQLite database."""
-    start_date, end_date = _resolve_date_range(start_date, end_date, DEFAULT_DAYS_BACK)
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
     start_seconds = int((start_date - APPLE_EPOCH).total_seconds())
     end_seconds = int((end_date - APPLE_EPOCH).total_seconds())
 
@@ -195,6 +200,7 @@ def raise_system_exit() -> NoReturn:
 
 
 def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
+    """Resolve an explicitly supplied calendar path and print discovery details."""
     try:
         calendar_path = Path(calendar_file).resolve()
     except OSError as error:
@@ -214,6 +220,7 @@ def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
 
 
 def _candidate_calendar_directories(home: Path) -> list[Path]:
+    """Return default directories searched for calendar exports."""
     return [
         home / "Library/Calendars",
         home / "Library/Application Support/Calendar",
@@ -224,6 +231,7 @@ def _candidate_calendar_directories(home: Path) -> list[Path]:
 
 
 def _discover_calendar_files(paths: Iterable[Path]) -> list[Path]:
+    """Search candidate directories for supported calendar files."""
     print("\nSearching for calendar files in:")
     calendar_files: list[Path] = []
     for path in paths:
@@ -234,6 +242,7 @@ def _discover_calendar_files(paths: Iterable[Path]) -> list[Path]:
 
 
 def _calendar_files_in_directory(path: Path) -> list[Path]:
+    """Return supported calendar files found recursively in a directory."""
     if not path.exists():
         return []
 
@@ -244,6 +253,7 @@ def _calendar_files_in_directory(path: Path) -> list[Path]:
 
 
 def _print_directory_search_result(path: Path, calendar_files: list[Path]) -> None:
+    """Print the calendar discovery result for a searched directory."""
     print(f"- {path}")
     if not path.exists():
         print("  ✗ Directory does not exist")
@@ -262,6 +272,7 @@ def _print_directory_search_result(path: Path, calendar_files: list[Path]) -> No
 
 
 def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
+    """Return the ICS path to analyze, including the first ICS inside an ICBU backup."""
     if calendar_path.suffix.lower() != ".icbu":
         return calendar_path
 
@@ -276,6 +287,7 @@ def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
 
 
 def _print_directory_contents(directory: Path, heading: str) -> None:
+    """Print directory contents for diagnostics without failing on listing errors."""
     print(heading)
     try:
         for item in directory.iterdir():
@@ -289,17 +301,20 @@ def _resolve_date_range(
     end_date: datetime | None,
     days_back: int,
 ) -> tuple[datetime, datetime]:
+    """Resolve optional date bounds into an inclusive analysis window."""
     resolved_end_date = end_date or datetime.now(PACIFIC)
     resolved_start_date = start_date or resolved_end_date - timedelta(days=days_back)
     return resolved_start_date, resolved_end_date
 
 
 def _read_ics_calendar(calendar_path: Path) -> Calendar:
+    """Read and parse an ICS calendar file."""
     with calendar_path.open("rb") as calendar_file:
         return Calendar.from_ical(calendar_file.read())
 
 
 def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: datetime) -> CalendarAnalysis:
+    """Collect meetings and aggregate stats from VEVENT entries in a date range."""
     meetings: list[Meeting] = []
     stats = _empty_stats()
 
@@ -321,6 +336,7 @@ def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: date
 
 
 def _event_start_datetime(event: Any) -> datetime | None:
+    """Return a VEVENT start datetime when the event has one."""
     start = event.get("dtstart")
     if start is None or not isinstance(start.dt, datetime):
         return None
@@ -328,6 +344,7 @@ def _event_start_datetime(event: Any) -> datetime | None:
 
 
 def _event_duration_hours(event: Any, start: datetime) -> float:
+    """Resolve a VEVENT duration in hours from duration, dtend, or a default."""
     duration = event.get("duration")
     if isinstance(duration, timedelta):
         return duration.total_seconds() / 3600
@@ -343,6 +360,7 @@ def _event_duration_hours(event: Any, start: datetime) -> float:
 
 
 def _duration_string_hours(duration: str) -> float:
+    """Parse simple ICS duration strings like PT1H into hours."""
     if duration.startswith("PT") and duration.endswith("H"):
         try:
             return float(duration[2:-1])
@@ -352,6 +370,7 @@ def _duration_string_hours(duration: str) -> float:
 
 
 def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
+    """Calculate event duration from dtend when it is available."""
     end = event.get("dtend")
     if end is None or not isinstance(end.dt, datetime):
         return None
@@ -361,6 +380,7 @@ def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
 
 
 def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> Meeting:
+    """Normalize a VEVENT into the meeting shape used by reporting."""
     return {
         "date": start.date(),
         "time": start.time(),
@@ -374,6 +394,7 @@ def _fetch_sqlite_calendar_rows(
     start_seconds: int,
     end_seconds: int,
 ) -> list[tuple[str | None, int, int]]:
+    """Fetch SQLite calendar rows in the Apple-epoch date range."""
     with closing(sqlite3.connect(calendar_path)) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -391,6 +412,7 @@ def _fetch_sqlite_calendar_rows(
 
 
 def _analyze_sqlite_rows(rows: Iterable[tuple[str | None, int, int]]) -> CalendarAnalysis:
+    """Normalize SQLite calendar rows and aggregate meeting stats."""
     meetings: list[Meeting] = []
     stats = _empty_stats()
 
@@ -412,15 +434,18 @@ def _analyze_sqlite_rows(rows: Iterable[tuple[str | None, int, int]]) -> Calenda
 
 
 def _empty_stats() -> MeetingStats:
+    """Create an empty meeting statistics accumulator."""
     return {"total_meetings": 0, "total_hours": 0.0}
 
 
 def _update_stats(stats: MeetingStats, duration_hours: float) -> None:
+    """Add one meeting and its duration to the statistics accumulator."""
     stats["total_meetings"] += 1
     stats["total_hours"] += duration_hours
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the calendar analyzer CLI."""
     parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
     parser.add_argument("--calendar", help="Path to the exported calendar file (.ics)")
     parser.add_argument("--start-date", help="Start date for analysis (YYYY-MM-DD)")
@@ -437,6 +462,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _parse_date_argument(value: str | None, label: str) -> datetime | None:
+    """Parse an optional YYYY-MM-DD CLI date into a Pacific-aware datetime."""
     if value is None:
         return None
 
@@ -448,6 +474,7 @@ def _parse_date_argument(value: str | None, label: str) -> datetime | None:
 
 
 def _validate_date_range(start_date: datetime | None, end_date: datetime | None) -> None:
+    """Exit with a user-facing error if the date range is inverted."""
     if start_date is None or end_date is None or end_date >= start_date:
         return
 
@@ -458,17 +485,38 @@ def _validate_date_range(start_date: datetime | None, end_date: datetime | None)
 
 
 def _write_or_print_summary(summary: str, output: str | None) -> None:
+    """Write the summary to a file or print it when no output path is supplied."""
     if output is None:
         print("\n" + summary)
         return
 
     try:
-        Path(output).write_text(summary, encoding="utf-8")
+        _write_text_atomic(Path(output), summary)
     except OSError as error:
         print(f"Error saving to file: {error}")
         raise_system_exit()
 
     print(f"\nAnalysis saved to: {output}")
+
+
+def _write_text_atomic(output_path: Path, content: str) -> None:
+    """Write text through a temporary file before replacing the destination."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=output_path.parent,
+            encoding="utf-8",
+            newline="\n",
+        ) as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(output_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
 if __name__ == "__main__":

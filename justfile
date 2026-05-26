@@ -142,7 +142,7 @@ toml-check: _ensure-uv
         files+=("$file")
     done < <(git ls-files -z '*.toml')
     if [ "${#files[@]}" -gt 0 ]; then
-        printf '%s\0' "${files[@]}" | xargs -0 -I {} uv run python -c "import sys, tomllib; exec(\"with open(sys.argv[1], 'rb') as f:\\n    tomllib.load(f)\"); print(f'{sys.argv[1]} is valid TOML')" {}
+        printf '%s\0' "${files[@]}" | xargs -0 -I {} uv run python -c "import pathlib, sys, tomllib; path = pathlib.Path(sys.argv[1]); tomllib.loads(path.read_text(encoding='utf-8')); print(f'{path} is valid TOML')" {}
     else
         echo "No TOML files found to check."
     fi
