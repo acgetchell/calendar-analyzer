@@ -322,23 +322,24 @@ def test_file_output_error(monkeypatch, capsys) -> None:
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "calendar-analyzer",
-            "--calendar",
-            tmp_path,
-            "--start-date",
-            "2023-06-30",
-            "--end-date",
-            "2023-07-03",
-            "--output",
-            "/invalid/path/output.txt",  # Invalid path
-        ],
-    )
+    with tempfile.TemporaryDirectory() as output_dir:
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "calendar-analyzer",
+                "--calendar",
+                tmp_path,
+                "--start-date",
+                "2023-06-30",
+                "--end-date",
+                "2023-07-03",
+                "--output",
+                output_dir,
+            ],
+        )
 
-    with pytest.raises(SystemExit) as exc_info:
-        calendar_analyzer.main()
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.main()
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out

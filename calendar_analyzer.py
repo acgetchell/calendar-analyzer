@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from icalendar import Calendar
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -519,5 +519,5 @@ def _write_text_atomic(output_path: Path, content: str) -> None:
             temp_path.unlink()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
