@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import textwrap
+import zipfile
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,15 @@ def create_temp_ics_file(content: str, suffix: str = ".ics") -> str:
         tmp.write(content)
         tmp.flush()
         return tmp.name
+
+
+def create_temp_olm_file(calendar_xml: str) -> str:
+    """Helper function to create a temporary OLM-like archive with Calendar.xml."""
+    with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
+        tmp_path = tmp.name
+    with zipfile.ZipFile(tmp_path, "w") as archive:
+        archive.writestr("Accounts/Calendar.xml", calendar_xml)
+    return tmp_path
 
 
 def create_temp_dummy_file(suffix: str = ".ics") -> str:
@@ -242,10 +252,11 @@ def test_print_calendar_export_instructions(capsys) -> None:
     calendar_analyzer.print_calendar_export_instructions()
 
     out = capsys.readouterr().out
-    assert "Please export your calendar from the Calendar app:" in out
-    assert "Open the Calendar app" in out
-    assert "File > Export" in out
-    assert "uv run calendar-analyzer --calendar" in out
+    assert "Please export your calendar from Calendar or Outlook:" in out
+    assert "Apple Calendar: select the calendar, then use File > Export" in out
+    assert "Outlook for Mac: export an Outlook archive (.olm)" in out
+    assert "Outlook can also be analyzed from exported ICS or CSV calendar files" in out
+    assert "just run --calendar" in out
 
 
 def test_generate_summary_no_meetings() -> None:
@@ -611,6 +622,25 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys) -> None:
 
 
 @patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_ignores_csv_files(mock_home, capsys) -> None:
+    """Test auto-discovery ignores generic CSV files unless explicitly requested."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        home_path = Path(tmp_dir)
+        mock_home.return_value = home_path
+        documents_dir = home_path / "Documents"
+        documents_dir.mkdir()
+        (documents_dir / "not-a-calendar.csv").write_text("Amount,Description\n1.00,Coffee\n")
+
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.get_calendar_path()
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "✗ No calendar files found" in out
+        assert "not-a-calendar.csv" not in out
+
+
+@patch("pathlib.Path.home")
 def test_get_calendar_path_auto_discovery_no_files(mock_home, capsys) -> None:
     """Test auto-discovery when no calendar files are found."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -629,7 +659,7 @@ def test_get_calendar_path_auto_discovery_no_files(mock_home, capsys) -> None:
         assert "Searching for calendar files in:" in out
         assert "✗ No calendar files found" in out
         assert "Error: No calendar files found in any of the expected locations." in out
-        assert "Please export your calendar from the Calendar app:" in out
+        assert "Please export your calendar from Calendar or Outlook:" in out
 
 
 @patch("pathlib.Path.home")
@@ -668,21 +698,23 @@ def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys)
         ics_file = documents_dir / "calendar.ics"
         icbu_file = library_dir / "backup.icbu"
         sqlite_file = library_dir / "calendar.sqlitedb"
+        olm_file = documents_dir / "calendar.olm"
 
         ics_file.write_text("ics content")
         icbu_file.write_text("icbu content")
         sqlite_file.write_text("sqlite content")
+        olm_file.write_text("olm content")
 
         result = calendar_analyzer.get_calendar_path()
 
         # Should find one of the files (the most recent one)
         assert result.exists()
-        assert result.suffix in [".ics", ".icbu", ".sqlitedb"]
+        assert result.suffix in [".ics", ".icbu", ".sqlitedb", ".olm"]
 
         out = capsys.readouterr().out
         # The function prints found files per directory, not total
         assert "✓ Found 2 calendar files" in out  # Library/Calendars
-        assert "✓ Found 1 calendar files" in out  # Documents
+        assert "✓ Found 2 calendar files" in out  # Documents
 
 
 @patch("pathlib.Path.home")
@@ -812,6 +844,141 @@ def test_analyze_calendar_with_sqlite_file_honors_days_back() -> None:
 
         assert meetings == []
         assert stats == {"total_meetings": 0, "total_hours": 0.0}
+
+
+def test_analyze_calendar_with_olm_file() -> None:
+    """Test direct Outlook for Mac OLM calendar analysis through analyze_calendar."""
+    calendar_xml = textwrap.dedent("""
+    <appointments>
+      <appointment>
+        <OPFCalendarEventCopySummary>Outlook Mac Meeting</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-07-01T17:00:00Z</OPFCalendarEventCopyStartTime>
+        <OPFCalendarEventCopyEndTime>2023-07-01T18:30:00Z</OPFCalendarEventCopyEndTime>
+      </appointment>
+      <appointment>
+        <OPFCalendarEventCopySummary>Outlook All Day</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-07-01T00:00:00Z</OPFCalendarEventCopyStartTime>
+        <OPFCalendarEventCopyIsAllDayEvent>true</OPFCalendarEventCopyIsAllDayEvent>
+      </appointment>
+    </appointments>
+    """)
+    tmp_path = create_temp_olm_file(calendar_xml)
+
+    try:
+        meetings, stats = calendar_analyzer.analyze_calendar(
+            Path(tmp_path),
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+    finally:
+        Path(tmp_path).unlink()
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.5}
+    assert meetings[0]["summary"] == "Outlook Mac Meeting"
+    assert meetings[0]["time"].hour == 10
+
+
+def test_analyze_olm_calendar_defaults_missing_end_and_summary() -> None:
+    """Test OLM calendar analysis defaults optional appointment fields."""
+    calendar_xml = textwrap.dedent("""
+    <appointments>
+      <appointment>
+        <OPFCalendarEventCopyStartTime>2023-07-01T10:00:00</OPFCalendarEventCopyStartTime>
+      </appointment>
+    </appointments>
+    """)
+    tmp_path = create_temp_olm_file(calendar_xml)
+
+    try:
+        meetings, stats = calendar_analyzer.analyze_olm_calendar(
+            Path(tmp_path),
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+    finally:
+        Path(tmp_path).unlink()
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.0}
+    assert meetings[0]["summary"] == "No Title"
+
+
+def test_analyze_olm_calendar_without_calendar_xml(capsys) -> None:
+    """Test OLM calendar analysis reports archives without Calendar.xml."""
+    with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    with zipfile.ZipFile(tmp_path, "w") as archive:
+        archive.writestr("Accounts/Mail.xml", "<emails />")
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+    finally:
+        tmp_path.unlink()
+
+    assert exc_info.value.code == 1
+    assert "Error parsing OLM calendar: No Calendar.xml entries found in OLM archive." in capsys.readouterr().out
+
+
+def test_analyze_olm_calendar_bad_archive(capsys) -> None:
+    """Test OLM calendar analysis reports unreadable OLM archives."""
+    with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
+        tmp.write(b"not a zip archive")
+        tmp_path = Path(tmp.name)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+    finally:
+        tmp_path.unlink()
+
+    assert exc_info.value.code == 1
+    assert "Error reading OLM calendar:" in capsys.readouterr().out
+
+
+def test_analyze_olm_calendar_errors_when_no_start_dates_parse(capsys) -> None:
+    """Test OLM calendar analysis reports unsupported date formats."""
+    calendar_xml = textwrap.dedent("""
+    <appointments>
+      <appointment>
+        <OPFCalendarEventCopySummary>Broken Date</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>not-a-date</OPFCalendarEventCopyStartTime>
+      </appointment>
+    </appointments>
+    """)
+    tmp_path = create_temp_olm_file(calendar_xml)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+    finally:
+        Path(tmp_path).unlink()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing OLM calendar: Could not parse any OLM appointment start dates." in out
+    assert "not-a-date" in out
+
+
+def test_analyze_calendar_with_explicit_outlook_csv_file() -> None:
+    """Test explicit Outlook CSV calendar analysis remains supported."""
+    with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", encoding="utf-8", newline="", delete=False) as tmp:
+        tmp.write("Subject,Start Date,Start Time,End Date,End Time,All day event\n")
+        tmp.write("CSV Meeting,07/01/2023,10:00 AM,07/01/2023,11:30 AM,False\n")
+        tmp.write("CSV All Day,07/01/2023,12:00 AM,07/01/2023,11:59 PM,True\n")
+        tmp_path = Path(tmp.name)
+
+    try:
+        meetings, stats = calendar_analyzer.analyze_calendar(
+            tmp_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+    finally:
+        tmp_path.unlink()
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.5}
+    assert meetings[0]["summary"] == "CSV Meeting"
+    assert meetings[0]["time"].hour == 10
 
 
 def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:

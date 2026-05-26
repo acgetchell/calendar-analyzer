@@ -87,6 +87,7 @@ name = "calendar-analyzer"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "defusedxml" },
     { name = "icalendar" },
     { name = "pandas" },
 ]
@@ -104,6 +105,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "icalendar", specifier = ">=6.3.1" },
     { name = "pandas", specifier = ">=2.3.0" },
 ]

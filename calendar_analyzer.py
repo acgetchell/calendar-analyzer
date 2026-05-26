@@ -1,11 +1,13 @@
-"""Analyze Apple Calendar exports and summarize meeting patterns."""
+"""Analyze Apple and Outlook calendar exports and summarize meeting patterns."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import sqlite3
 import sys
 import tempfile
+import zipfile
 from contextlib import closing
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -13,16 +15,25 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from defusedxml import ElementTree
 from icalendar import Calendar
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
+    from xml.etree.ElementTree import Element
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
-CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb")
+CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb", "*.olm")
 DEFAULT_DAYS_BACK = 365
 DEFAULT_DURATION_HOURS = 1.0
+OUTLOOK_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y")
+OUTLOOK_TIME_FORMATS = ("%I:%M %p", "%I:%M:%S %p", "%H:%M", "%H:%M:%S")
+OUTLOOK_DATETIME_FORMATS = (
+    *(f"{date_format} {time_format}" for date_format in OUTLOOK_DATE_FORMATS for time_format in OUTLOOK_TIME_FORMATS),
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+)
 
 
 class Meeting(TypedDict):
@@ -53,13 +64,13 @@ def convert_to_pacific(dt: datetime) -> datetime:
 
 def print_calendar_export_instructions() -> None:
     """Print instructions for exporting a calendar file."""
-    print("\nPlease export your calendar from the Calendar app:")
-    print("1. Open the Calendar app")
-    print("2. Select the calendar(s) you want to analyze")
-    print("3. Go to File > Export")
+    print("\nPlease export your calendar from Calendar or Outlook:")
+    print("1. Apple Calendar: select the calendar, then use File > Export")
+    print("2. Outlook for Mac: export an Outlook archive (.olm)")
+    print("3. Outlook can also be analyzed from exported ICS or CSV calendar files")
     print("4. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
-    print("uv run calendar-analyzer --calendar /path/to/your/calendar.ics")
+    print("just run --calendar /path/to/your/calendar.olm")
 
 
 def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
@@ -87,6 +98,10 @@ def analyze_calendar(
     """Analyze calendar events from the specified date range."""
     if calendar_path.suffix.lower() == ".sqlitedb":
         return analyze_sqlite_calendar(calendar_path, start_date, end_date, days_back)
+    if calendar_path.suffix.lower() == ".olm":
+        return analyze_olm_calendar(calendar_path, start_date, end_date, days_back)
+    if calendar_path.suffix.lower() == ".csv":
+        return analyze_outlook_csv_calendar(calendar_path, start_date, end_date, days_back)
     if calendar_path.suffix.lower() == ".icbu":
         sqlite_db_path = calendar_path / "Calendar.sqlitedb"
         if sqlite_db_path.exists():
@@ -126,6 +141,47 @@ def analyze_sqlite_calendar(
         raise_system_exit()
 
     return _analyze_sqlite_rows(rows)
+
+
+def analyze_outlook_csv_calendar(
+    calendar_path: Path,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    days_back: int = DEFAULT_DAYS_BACK,
+) -> CalendarAnalysis:
+    """Analyze events from an Outlook CSV calendar export."""
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+
+    try:
+        rows = _read_outlook_csv_rows(calendar_path)
+    except OSError as error:
+        print(f"Error reading Outlook CSV calendar: {error}")
+        raise_system_exit()
+    except ValueError as error:
+        print(f"Error parsing Outlook CSV calendar: {error}")
+        raise_system_exit()
+
+    return _analyze_outlook_csv_rows(rows, start_date, end_date)
+
+
+def analyze_olm_calendar(
+    calendar_path: Path,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    days_back: int = DEFAULT_DAYS_BACK,
+) -> CalendarAnalysis:
+    """Analyze calendar appointments from an Outlook for Mac OLM archive."""
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+
+    try:
+        appointments = _read_olm_appointments(calendar_path)
+        return _analyze_olm_appointments(appointments, start_date, end_date)
+    except (OSError, zipfile.BadZipFile) as error:
+        print(f"Error reading OLM calendar: {error}")
+        raise_system_exit()
+    except ValueError as error:
+        print(f"Error parsing OLM calendar: {error}")
+        raise_system_exit()
 
 
 def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: int = 50) -> str:
@@ -433,6 +489,309 @@ def _analyze_sqlite_rows(rows: Iterable[tuple[str | None, int, int]]) -> Calenda
     return meetings, stats
 
 
+def _read_olm_appointments(calendar_path: Path) -> list[Element]:
+    """Read appointment XML entries from an Outlook for Mac OLM archive."""
+    appointments: list[Element] = []
+    calendar_entries = 0
+    with zipfile.ZipFile(calendar_path) as archive:
+        for name in sorted(archive.namelist()):
+            if not name.endswith("Calendar.xml"):
+                continue
+
+            calendar_entries += 1
+            try:
+                root = ElementTree.fromstring(archive.read(name))
+            except ElementTree.ParseError as error:
+                msg = f"{name} is not valid XML: {error}"
+                raise ValueError(msg) from error
+            appointments.extend(_olm_xml_appointments(root))
+
+    if calendar_entries == 0:
+        msg = "No Calendar.xml entries found in OLM archive."
+        raise ValueError(msg)
+    return appointments
+
+
+def _olm_xml_appointments(root: Element) -> list[Element]:
+    """Return appointment elements from an OLM Calendar.xml tree."""
+    return [element for element in root.iter() if _xml_local_name(element.tag) == "appointment"]
+
+
+def _analyze_olm_appointments(
+    appointments: Iterable[Element],
+    start_date: datetime,
+    end_date: datetime,
+) -> CalendarAnalysis:
+    """Normalize OLM appointment XML and aggregate meeting stats."""
+    meetings: list[Meeting] = []
+    stats = _empty_stats()
+    dated_appointments = 0
+    unparsable_start_values: list[str] = []
+
+    for appointment in appointments:
+        if _xml_truthy(_xml_text(appointment, ("OPFCalendarEventCopyIsAllDayEvent", "AllDayEvent"))):
+            continue
+
+        start_value = _olm_appointment_start_text(appointment)
+        if start_value is not None:
+            dated_appointments += 1
+
+        start = _olm_appointment_start(appointment)
+        if start is None:
+            if start_value is not None:
+                unparsable_start_values.append(start_value)
+            continue
+
+        start = convert_to_pacific(start)
+        if not start_date <= start <= end_date:
+            continue
+
+        end = _olm_appointment_end(appointment, start)
+        duration_hours = _positive_duration_hours(start, end)
+        meetings.append(
+            {
+                "date": start.date(),
+                "time": start.time(),
+                "summary": _xml_text(appointment, ("OPFCalendarEventCopySummary", "Subject", "Summary")) or "No Title",
+                "duration_hours": duration_hours,
+            }
+        )
+        _update_stats(stats, duration_hours)
+
+    if dated_appointments and dated_appointments == len(unparsable_start_values):
+        examples = ", ".join(unparsable_start_values[:3])
+        msg = f"Could not parse any OLM appointment start dates. Example value(s): {examples}"
+        raise ValueError(msg)
+
+    return meetings, stats
+
+
+def _olm_appointment_start(appointment: Element) -> datetime | None:
+    """Return the start datetime from an OLM appointment."""
+    return _outlook_datetime(_olm_appointment_start_text(appointment))
+
+
+def _olm_appointment_start_text(appointment: Element) -> str | None:
+    """Return the raw OLM appointment start value."""
+    return _xml_text(
+        appointment,
+        (
+            "OPFCalendarEventCopyStartTime",
+            "OPFCalendarEventCopyStartDate",
+            "StartTime",
+            "StartDate",
+        ),
+    )
+
+
+def _olm_appointment_end(appointment: Element, start: datetime) -> datetime:
+    """Return the end datetime from an OLM appointment."""
+    end = _outlook_datetime(
+        _xml_text(
+            appointment,
+            (
+                "OPFCalendarEventCopyEndTime",
+                "OPFCalendarEventCopyEndDate",
+                "EndTime",
+                "EndDate",
+            ),
+        )
+    )
+    return end or start + timedelta(hours=DEFAULT_DURATION_HOURS)
+
+
+def _xml_text(element: Element, field_names: tuple[str, ...]) -> str | None:
+    """Return text from the first matching descendant XML element."""
+    normalized_names = {_normalize_csv_field(field_name) for field_name in field_names}
+    for child in element.iter():
+        if _normalize_csv_field(_xml_local_name(child.tag)) not in normalized_names:
+            continue
+
+        text = "".join(child.itertext()).strip()
+        if text:
+            return text
+    return None
+
+
+def _xml_local_name(tag: str) -> str:
+    """Return an XML tag name without any namespace prefix."""
+    return tag.rsplit("}", maxsplit=1)[-1]
+
+
+def _xml_truthy(value: str | None) -> bool:
+    """Return whether an OLM XML boolean-ish value means true."""
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _read_outlook_csv_rows(calendar_path: Path) -> list[dict[str, str]]:
+    """Read an Outlook CSV export and validate that it has usable date columns."""
+    with calendar_path.open(newline="", encoding="utf-8-sig") as calendar_file:
+        reader = csv.DictReader(calendar_file)
+        fieldnames = reader.fieldnames or []
+        _validate_outlook_csv_headers(fieldnames)
+        return [{key: value or "" for key, value in row.items() if key is not None} for row in reader]
+
+
+def _validate_outlook_csv_headers(fieldnames: Iterable[str]) -> None:
+    """Raise a user-facing error when a CSV file does not look like a calendar export."""
+    fields = list(fieldnames)
+    if not fields:
+        msg = "CSV header row is missing."
+        raise ValueError(msg)
+
+    has_split_start = _csv_has_field(fields, ("Start Date", "StartDate")) and _csv_has_field(
+        fields,
+        ("Start Time", "StartTime"),
+    )
+    has_combined_start = _csv_has_field(fields, ("Start", "Starts", "Start Date Time", "StartDateTime"))
+    if not has_split_start and not has_combined_start:
+        msg = "CSV must include Outlook start columns such as Start Date and Start Time, or a combined Start column."
+        raise ValueError(msg)
+
+
+def _analyze_outlook_csv_rows(
+    rows: Iterable[dict[str, str]],
+    start_date: datetime,
+    end_date: datetime,
+) -> CalendarAnalysis:
+    """Normalize Outlook CSV rows and aggregate meeting stats."""
+    meetings: list[Meeting] = []
+    stats = _empty_stats()
+
+    for row in rows:
+        start = _outlook_csv_start_datetime(row)
+        if start is None:
+            continue
+
+        start = convert_to_pacific(start)
+        if not start_date <= start <= end_date:
+            continue
+
+        end = _outlook_csv_end_datetime(row, start)
+        duration_hours = _positive_duration_hours(start, end)
+        meetings.append(
+            {
+                "date": start.date(),
+                "time": start.time(),
+                "summary": _csv_value(row, ("Subject", "Title", "Summary")) or "No Title",
+                "duration_hours": duration_hours,
+            }
+        )
+        _update_stats(stats, duration_hours)
+
+    return meetings, stats
+
+
+def _outlook_csv_start_datetime(row: dict[str, str]) -> datetime | None:
+    """Return the row start datetime, skipping all-day rows."""
+    if _csv_truthy(_csv_value(row, ("All day event", "All Day Event", "All Day", "AllDayEvent"))):
+        return None
+
+    return _outlook_split_datetime(row, ("Start Date", "StartDate"), ("Start Time", "StartTime")) or _outlook_datetime(
+        _csv_value(row, ("Start", "Starts", "Start Date Time", "StartDateTime"))
+    )
+
+
+def _outlook_csv_end_datetime(row: dict[str, str], start: datetime) -> datetime:
+    """Return the row end datetime, defaulting when Outlook omitted one."""
+    end = _outlook_split_datetime(
+        row,
+        ("End Date", "EndDate"),
+        ("End Time", "EndTime"),
+        fallback_date=start,
+    ) or _outlook_datetime(_csv_value(row, ("End", "Ends", "End Date Time", "EndDateTime")))
+
+    return end or start + timedelta(hours=DEFAULT_DURATION_HOURS)
+
+
+def _outlook_split_datetime(
+    row: dict[str, str],
+    date_aliases: tuple[str, ...],
+    time_aliases: tuple[str, ...],
+    fallback_date: datetime | None = None,
+) -> datetime | None:
+    """Parse Outlook date and time columns into a Pacific-aware datetime."""
+    date_value = _csv_value(row, date_aliases)
+    time_value = _csv_value(row, time_aliases)
+    if not date_value and fallback_date is None:
+        return None
+    if not date_value:
+        date_value = _fallback_date_text(fallback_date)
+    if not time_value:
+        time_value = "12:00 AM"
+
+    return _outlook_datetime(f"{date_value} {time_value}") or _outlook_datetime(date_value)
+
+
+def _fallback_date_text(fallback_date: datetime | None) -> str:
+    """Return a date string for the already-validated fallback date."""
+    if fallback_date is None:
+        msg = "Fallback date is required."
+        raise ValueError(msg)
+    return fallback_date.strftime("%Y-%m-%d")
+
+
+def _outlook_datetime(value: str | None) -> datetime | None:
+    """Parse a date/time value from an Outlook CSV export."""
+    if value is None or not value.strip():
+        return None
+
+    text = value.strip()
+    for date_format in OUTLOOK_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, date_format).replace(tzinfo=PACIFIC)
+        except ValueError:
+            continue
+
+    for date_format in OUTLOOK_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, date_format).replace(tzinfo=PACIFIC)
+        except ValueError:
+            continue
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=PACIFIC)
+    return convert_to_pacific(parsed)
+
+
+def _positive_duration_hours(start: datetime, end: datetime) -> float:
+    """Return a positive duration, falling back when end precedes start."""
+    duration_hours = (end - start).total_seconds() / 3600
+    if duration_hours <= 0:
+        return DEFAULT_DURATION_HOURS
+    return duration_hours
+
+
+def _csv_value(row: dict[str, str], aliases: tuple[str, ...]) -> str | None:
+    """Return a CSV value by case-insensitive, punctuation-insensitive field alias."""
+    normalized_aliases = {_normalize_csv_field(alias) for alias in aliases}
+    for field, raw_value in row.items():
+        if _normalize_csv_field(field) in normalized_aliases:
+            value = raw_value.strip()
+            return value or None
+    return None
+
+
+def _csv_has_field(fields: Iterable[str], aliases: tuple[str, ...]) -> bool:
+    """Return whether any CSV field matches one of the aliases."""
+    normalized_aliases = {_normalize_csv_field(alias) for alias in aliases}
+    return any(_normalize_csv_field(field) in normalized_aliases for field in fields)
+
+
+def _normalize_csv_field(value: str) -> str:
+    """Normalize CSV headers for tolerant matching across Outlook variants."""
+    return "".join(character for character in value.lower() if character.isalnum())
+
+
+def _csv_truthy(value: str | None) -> bool:
+    """Return whether an Outlook CSV boolean-ish cell means true."""
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _empty_stats() -> MeetingStats:
     """Create an empty meeting statistics accumulator."""
     return {"total_meetings": 0, "total_hours": 0.0}
@@ -447,7 +806,7 @@ def _update_stats(stats: MeetingStats, duration_hours: float) -> None:
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the calendar analyzer CLI."""
     parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
-    parser.add_argument("--calendar", help="Path to the exported calendar file (.ics)")
+    parser.add_argument("--calendar", help="Path to the exported calendar file (.ics, .olm, .csv, .icbu, .sqlitedb)")
     parser.add_argument("--start-date", help="Start date for analysis (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date for analysis (YYYY-MM-DD)")
     parser.add_argument(

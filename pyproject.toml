@@ -13,7 +13,7 @@ classifiers = [
 description = "A Python script that analyzes your Apple Calendar data and provides a summary of your meetings"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["icalendar>=6.3.1", "pandas>=2.3.0"]
+dependencies = ["defusedxml>=0.7.1", "icalendar>=6.3.1", "pandas>=2.3.0"]
 
 [project.scripts]
 calendar-analyzer = "calendar_analyzer:main"
