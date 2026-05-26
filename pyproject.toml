@@ -1,37 +1,129 @@
 [project]
 name = "calendar-analyzer"
 version = "0.1.0"
-authors = [
-    {name = "Adam Getchell", email = "your-email@example.com"}
-]
-license = {text = "MIT"}
+authors = [{ name = "Adam Getchell", email = "adam@adamgetchell.org" }]
+license = { text = "MIT" }
 keywords = ["calendar", "analysis", "productivity", "meeting-summary"]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent"
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
 ]
 description = "A Python script that analyzes your Apple Calendar data and provides a summary of your meetings"
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = [
-    "icalendar>=6.3.1",
-    "pandas>=2.3.0",
-    "python-dateutil>=2.9.0",
-]
+requires-python = ">=3.11"
+dependencies = ["icalendar>=6.3.1", "pandas>=2.3.0"]
+
+[project.scripts]
+calendar-analyzer = "calendar_analyzer:main"
 
 [dependency-groups]
-dev = [
-    "pylint>=3.3.7",
-    "isort>=6.0.1",
-    "pytest>=8.2.1",
-    "pytest-cov>=6.2.1",
-    "bandit>=1.8.5",
+dev = ["pytest>=8.2.1", "pytest-cov>=6.2.1", "ruff>=0.12.11", "ty>=0.0.8"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["."]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "ANN201",
+  "ANN202",
+  "ANN204",
+  "C90",
+  "I",
+  "N",
+  "UP",
+  "YTT",
+  "ASYNC",
+  "S",
+  "BLE",
+  "FBT",
+  "B",
+  "A",
+  "COM",
+  "C4",
+  "DTZ",
+  "FA",
+  "T10",
+  "EM",
+  "EXE",
+  "FIX",
+  "FLY",
+  "FURB",
+  "ISC",
+  "ICN",
+  "LOG",
+  "G",
+  "INP",
+  "PERF",
+  "PIE",
+  "PYI",
+  "PT",
+  "Q",
+  "RSE",
+  "PTH",
+  "ERA",
+  "PD",
+  "PGH",
+  "RET",
+  "SLF",
+  "SIM",
+  "SLOT",
+  "TC",
+  "TID",
+  "TD",
+  "ARG",
+  "TRY",
+  "PL",
+  "NPY",
+  "RUF",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D105",
+  "D106",
+  "D107",
+]
+fixable = ["ALL"]
+ignore = [
+  "COM812",  # Formatter conflict.
+  "ISC001",  # Formatter conflict.
+  "PLR2004", # Magic values are acceptable in compact CLI/tests.
+  "T201",    # This is a user-facing CLI.
+  "TRY003",  # CLI error messages are clearer inline.
+  "EM102",   # Dynamic CLI error messages are intentional.
 ]
 
-[tool.bandit]
-# Skip assert_used (B101) warnings in test files since assertions are expected in tests
-skips = ["B101"]
+[tool.ruff.lint.per-file-ignores]
+"tests/test_*.py" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["calendar_analyzer"]
+combine-as-imports = true
+split-on-trailing-comma = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-markers", "--strict-config", "--color=yes"]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 
 [build-system]
 requires = ["hatchling"]

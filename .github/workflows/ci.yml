@@ -1,46 +1,84 @@
 name: CI
 
-on: [push, pull_request]
+permissions:
+  contents: read
+
+concurrency:
+  group: >
+    ci-${{ github.workflow }}-${{
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.number ||
+      github.ref
+    }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  JUST_VERSION: "1.51.0"
+  TAPLO_VERSION: "0.10.0"
+  TYPOS_VERSION: "1.46.1"
+  UV_VERSION: "0.11.15"
 
 jobs:
-  test:
-    runs-on: macos-latest
+  ci:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        python-version:
+          - "3.11"
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Install uv
-      uses: astral-sh/setup-uv@v4
-      with:
-        version: "latest"
-        enable-cache: true
-    
-    - name: Set up uv cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/uv
-          .venv
-        key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/uv.lock') }}
-        restore-keys: |
-          uv-${{ runner.os }}-${{ matrix.python-version }}-
-          uv-${{ runner.os }}-
-    
-    - name: Create virtual environment
-      run: |
-        uv venv --python ${{ matrix.python-version }}
-    
-    - name: Install dependencies
-      run: |
-        uv sync --group dev
-    
-    - name: Run tests
-      run: |
-        uv run pytest -v
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install just
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+
+      - name: Install taplo
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: taplo-cli@${{ env.TAPLO_VERSION }}
+
+      - name: Install typos-cli
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: typos-cli@${{ env.TYPOS_VERSION }}
+
+      - name: Install shell script tools
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: shellcheck,shfmt
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: Sync dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run CI
+        run: just ci

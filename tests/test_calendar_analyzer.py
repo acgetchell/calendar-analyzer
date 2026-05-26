@@ -1,22 +1,18 @@
 """Tests for calendar_analyzer module."""
 
-# Standard library imports
 import os
 import tempfile
 import textwrap
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-# Third-party imports
 import pytest
-from dateutil import tz
 
-# Local imports
 import calendar_analyzer
 
 
-def create_temp_ics_file(content, suffix=".ics"):
+def create_temp_ics_file(content: str, suffix: str = ".ics") -> str:
     """Helper function to create a temporary ICS file with specified content.
 
     Args:
@@ -35,7 +31,7 @@ def create_temp_ics_file(content, suffix=".ics"):
         return tmp.name
 
 
-def create_temp_dummy_file(suffix=".ics"):
+def create_temp_dummy_file(suffix: str = ".ics") -> str:
     """Helper function to create a temporary dummy file path.
 
     Args:
@@ -48,11 +44,10 @@ def create_temp_dummy_file(suffix=".ics"):
         The caller is responsible for cleaning up the file using os.unlink()
     """
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as dummy_file:
-        dummy_path = dummy_file.name
-    return dummy_path
+        return dummy_file.name
 
 
-def test_analyze_mock_ics(monkeypatch, capsys):
+def test_analyze_mock_ics(monkeypatch, capsys) -> None:
     """Test analyzing a mock ICS calendar file with sample events."""
     # Step 1: Create a mock ICS calendar file
     ics_content = textwrap.dedent("""
@@ -74,13 +69,20 @@ def test_analyze_mock_ics(monkeypatch, capsys):
     tmp_path = create_temp_ics_file(ics_content)
 
     # Step 2: Patch arguments to simulate CLI input
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", tmp_path,
-        "--start-date", "2023-06-30",
-        "--end-date", "2023-07-03",
-        "--titles", "10"
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar_analyzer.py",
+            "--calendar",
+            tmp_path,
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+            "--titles",
+            "10",
+        ],
+    )
 
     # Step 3: Run the script
     calendar_analyzer.main()
@@ -93,16 +95,12 @@ def test_analyze_mock_ics(monkeypatch, capsys):
     assert "Total Meeting Hours: 3.0" in out
 
 
-def test_invalid_start_date_format(monkeypatch, capsys):
+def test_invalid_start_date_format(monkeypatch, capsys) -> None:
     """Test that invalid start date format causes system exit."""
     # Create a temporary dummy file path (secure alternative to mktemp)
     dummy_path = create_temp_dummy_file()
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", dummy_path,
-        "--start-date", "invalid-date"
-    ])
+    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", dummy_path, "--start-date", "invalid-date"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -112,16 +110,12 @@ def test_invalid_start_date_format(monkeypatch, capsys):
     assert "Error: Start date must be in YYYY-MM-DD format" in out
 
 
-def test_invalid_end_date_format(monkeypatch, capsys):
+def test_invalid_end_date_format(monkeypatch, capsys) -> None:
     """Test that invalid end date format causes system exit."""
     # Create a temporary dummy file path (secure alternative to mktemp)
     dummy_path = create_temp_dummy_file()
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", dummy_path,
-        "--end-date", "2023/01/01"
-    ])
+    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", dummy_path, "--end-date", "2023/01/01"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -131,17 +125,15 @@ def test_invalid_end_date_format(monkeypatch, capsys):
     assert "Error: End date must be in YYYY-MM-DD format" in out
 
 
-def test_end_date_before_start_date(monkeypatch, capsys):
+def test_end_date_before_start_date(monkeypatch, capsys) -> None:
     """Test that end date before start date causes system exit."""
     # Create a temporary dummy file path (secure alternative to mktemp)
     dummy_path = create_temp_dummy_file()
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", dummy_path,
-        "--start-date", "2023-07-01",
-        "--end-date", "2023-06-30"
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["calendar_analyzer.py", "--calendar", dummy_path, "--start-date", "2023-07-01", "--end-date", "2023-06-30"],
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -153,7 +145,7 @@ def test_end_date_before_start_date(monkeypatch, capsys):
     assert "End date: 2023-06-30" in out
 
 
-def test_valid_date_formats(monkeypatch, capsys):
+def test_valid_date_formats(monkeypatch, capsys) -> None:
     """Test that valid date formats are parsed correctly."""
     # Create a mock ICS file
     ics_content = textwrap.dedent("""
@@ -169,12 +161,10 @@ def test_valid_date_formats(monkeypatch, capsys):
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", tmp_path,
-        "--start-date", "2023-06-30",
-        "--end-date", "2023-07-31"
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["calendar_analyzer.py", "--calendar", tmp_path, "--start-date", "2023-06-30", "--end-date", "2023-07-31"],
+    )
 
     # Should not raise SystemExit
     calendar_analyzer.main()
@@ -183,19 +173,24 @@ def test_valid_date_formats(monkeypatch, capsys):
     assert "Test Meeting" in out
 
 
-def test_edge_case_dates(monkeypatch, capsys):
+def test_edge_case_dates(monkeypatch, capsys) -> None:
     """Test edge case date formats."""
     # Test leap year date
     # Create a temporary dummy file path that doesn't exist
     dummy_path = create_temp_dummy_file()
     # Remove the file to make it nonexistent (for this test)
-    os.unlink(dummy_path)
+    Path(dummy_path).unlink()
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", dummy_path,
-        "--start-date", "2024-02-29"  # Valid leap year date
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar_analyzer.py",
+            "--calendar",
+            dummy_path,
+            "--start-date",
+            "2024-02-29",  # Valid leap year date
+        ],
+    )
 
     with pytest.raises(SystemExit):  # Will fail because dummy file doesn't exist
         calendar_analyzer.main()
@@ -203,13 +198,18 @@ def test_edge_case_dates(monkeypatch, capsys):
     # Test invalid leap year date
     dummy_path2 = create_temp_dummy_file()
     # Remove this file too since we want to test date validation, not file reading
-    os.unlink(dummy_path2)
+    Path(dummy_path2).unlink()
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", dummy_path2,
-        "--start-date", "2023-02-29"  # Invalid - 2023 is not a leap year
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar_analyzer.py",
+            "--calendar",
+            dummy_path2,
+            "--start-date",
+            "2023-02-29",  # Invalid - 2023 is not a leap year
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -219,22 +219,22 @@ def test_edge_case_dates(monkeypatch, capsys):
     assert "Error: Start date must be in YYYY-MM-DD format" in out
 
 
-def test_convert_to_pacific():
+def test_convert_to_pacific() -> None:
     """Test timezone conversion function."""
     # Test UTC to Pacific conversion
-    utc_time = datetime(2023, 7, 1, 17, 0, 0, tzinfo=tz.UTC)
+    utc_time = datetime(2023, 7, 1, 17, 0, 0, tzinfo=UTC)
     pacific_time = calendar_analyzer.convert_to_pacific(utc_time)
 
     # During PDT (July), UTC-7
     assert pacific_time.hour == 10  # 17:00 UTC = 10:00 PDT
 
     # Test naive datetime (assumed UTC)
-    naive_time = datetime(2023, 7, 1, 17, 0, 0)
+    naive_time = datetime.fromisoformat("2023-07-01T17:00:00")
     pacific_time = calendar_analyzer.convert_to_pacific(naive_time)
     assert pacific_time.hour == 10
 
 
-def test_print_calendar_export_instructions(capsys):
+def test_print_calendar_export_instructions(capsys) -> None:
     """Test calendar export instructions function."""
     calendar_analyzer.print_calendar_export_instructions()
 
@@ -242,19 +242,19 @@ def test_print_calendar_export_instructions(capsys):
     assert "Please export your calendar from the Calendar app:" in out
     assert "Open the Calendar app" in out
     assert "File > Export" in out
-    assert "python calendar_analyzer.py --calendar" in out
+    assert "uv run calendar-analyzer --calendar" in out
 
 
-def test_generate_summary_no_meetings():
+def test_generate_summary_no_meetings() -> None:
     """Test generate_summary with no meetings."""
-    meetings = []
-    stats = {'total_meetings': 0, 'total_hours': 0}
+    meetings: list[calendar_analyzer.Meeting] = []
+    stats: calendar_analyzer.MeetingStats = {"total_meetings": 0, "total_hours": 0.0}
 
     result = calendar_analyzer.generate_summary(meetings, stats)
     assert result == "No meetings found in the specified time period."
 
 
-def test_file_output_functionality(monkeypatch, capsys):
+def test_file_output_functionality(monkeypatch, capsys) -> None:
     """Test saving analysis to a file."""
     # Create a mock ICS file
     ics_content = textwrap.dedent("""
@@ -273,18 +273,25 @@ def test_file_output_functionality(monkeypatch, capsys):
     with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmp_output:
         output_path = tmp_output.name
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", tmp_ics_path,
-        "--start-date", "2023-06-30",
-        "--end-date", "2023-07-03",
-        "--output", output_path
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar_analyzer.py",
+            "--calendar",
+            tmp_ics_path,
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+            "--output",
+            output_path,
+        ],
+    )
 
     calendar_analyzer.main()
 
     # Check that file was created and contains expected content
-    with open(output_path, 'r', encoding='utf-8') as f:
+    with Path(output_path).open(encoding="utf-8") as f:
         content = f.read()
         assert "Test Meeting" in content
         assert "Calendar Analysis Summary" in content
@@ -293,11 +300,11 @@ def test_file_output_functionality(monkeypatch, capsys):
     assert f"Analysis saved to: {output_path}" in out
 
     # Clean up
-    os.unlink(tmp_ics_path)
-    os.unlink(output_path)
+    Path(tmp_ics_path).unlink()
+    Path(output_path).unlink()
 
 
-def test_file_output_error(monkeypatch, capsys):
+def test_file_output_error(monkeypatch, capsys) -> None:
     """Test file output error handling."""
     ics_content = textwrap.dedent("""
     BEGIN:VCALENDAR
@@ -312,13 +319,20 @@ def test_file_output_error(monkeypatch, capsys):
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", tmp_path,
-        "--start-date", "2023-06-30",
-        "--end-date", "2023-07-03",
-        "--output", "/invalid/path/output.txt"  # Invalid path
-    ])
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar_analyzer.py",
+            "--calendar",
+            tmp_path,
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+            "--output",
+            "/invalid/path/output.txt",  # Invalid path
+        ],
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -328,15 +342,12 @@ def test_file_output_error(monkeypatch, capsys):
     assert "Error saving to file:" in out
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_calendar_file_read_error(monkeypatch, capsys):
+def test_calendar_file_read_error(monkeypatch, capsys) -> None:
     """Test error handling when calendar file cannot be read."""
-    monkeypatch.setattr("sys.argv", [
-        "calendar_analyzer.py",
-        "--calendar", "/nonexistent/file.ics"
-    ])
+    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", "/nonexistent/file.ics"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -346,7 +357,7 @@ def test_calendar_file_read_error(monkeypatch, capsys):
     assert "Error reading calendar file:" in out
 
 
-def test_analyze_calendar_with_different_duration_formats():
+def test_analyze_calendar_with_different_duration_formats() -> None:
     """Test calendar analysis with various duration formats."""
     # Test with DTEND instead of DURATION
     ics_content = textwrap.dedent("""
@@ -369,38 +380,38 @@ def test_analyze_calendar_with_different_duration_formats():
     _, stats = calendar_analyzer.analyze_calendar(
         Path(tmp_path),
         datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
     )
 
     # Should have 2 meetings
-    assert stats['total_meetings'] == 2
+    assert stats["total_meetings"] == 2
     # First meeting should have some duration, second defaults to 1 hour
-    assert stats['total_hours'] >= 2.0
+    assert stats["total_hours"] >= 2.0
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_generate_summary_with_long_titles():
+def test_generate_summary_with_long_titles() -> None:
     """Test generate_summary with very long meeting titles."""
     # Create meetings with long titles
     long_title = "A" * 150  # 150 character title
-    meetings = [
+    meetings: list[calendar_analyzer.Meeting] = [
         {
-            'date': datetime(2023, 7, 1).date(),
-            'time': datetime(2023, 7, 1, 10, 0).time(),
-            'summary': long_title,
-            'duration_hours': 1.0
+            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            "time": datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+            "summary": long_title,
+            "duration_hours": 1.0,
         },
         {
-            'date': datetime(2023, 7, 1).date(),
-            'time': datetime(2023, 7, 1, 14, 0).time(),
-            'summary': 'Short title',
-            'duration_hours': 1.0
-        }
+            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            "time": datetime(2023, 7, 1, 14, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+            "summary": "Short title",
+            "duration_hours": 1.0,
+        },
     ]
 
-    stats = {'total_meetings': 2, 'total_hours': 2.0}
+    stats: calendar_analyzer.MeetingStats = {"total_meetings": 2, "total_hours": 2.0}
 
     result = calendar_analyzer.generate_summary(meetings, stats, 5)
 
@@ -410,7 +421,7 @@ def test_generate_summary_with_long_titles():
     assert "Total Meetings: 2" in result
 
 
-def test_analyze_calendar_date_filtering():
+def test_analyze_calendar_date_filtering() -> None:
     """Test that date filtering works correctly."""
     ics_content = textwrap.dedent("""
     BEGIN:VCALENDAR
@@ -438,18 +449,18 @@ def test_analyze_calendar_date_filtering():
     meetings, stats = calendar_analyzer.analyze_calendar(
         Path(tmp_path),
         datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC)
+        datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC),
     )
 
     # Should only have the meeting in range
-    assert stats['total_meetings'] == 1
-    assert meetings[0]['summary'] == 'In Range'
+    assert stats["total_meetings"] == 1
+    assert meetings[0]["summary"] == "In Range"
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_get_calendar_path_with_specified_file(capsys):
+def test_get_calendar_path_with_specified_file(capsys) -> None:
     """Test get_calendar_path when a specific file is provided."""
     # Create a temporary file
     tmp_path = create_temp_ics_file("test content")
@@ -464,10 +475,10 @@ def test_get_calendar_path_with_specified_file(capsys):
         assert "Path exists: True" in out
         assert "Is directory: False" in out
     finally:
-        os.unlink(tmp_path)
+        Path(tmp_path).unlink()
 
 
-def test_get_calendar_path_with_directory(capsys):
+def test_get_calendar_path_with_directory(capsys) -> None:
     """Test get_calendar_path when a directory is provided."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         # Create some files in the directory
@@ -486,12 +497,12 @@ def test_get_calendar_path_with_directory(capsys):
         assert "test.txt" in out
 
 
-def test_get_calendar_path_nonexistent_file(capsys):
+def test_get_calendar_path_nonexistent_file(capsys) -> None:
     """Test get_calendar_path with a nonexistent file."""
     # Use a more secure temporary path that doesn't exist
     nonexistent_path = create_temp_dummy_file("_nonexistent.ics")
     # Remove the file to make it nonexistent but keep the secure path
-    os.unlink(nonexistent_path)
+    Path(nonexistent_path).unlink()
 
     result = calendar_analyzer.get_calendar_path(nonexistent_path)
 
@@ -502,9 +513,9 @@ def test_get_calendar_path_nonexistent_file(capsys):
     assert "Path exists: False" in out
 
 
-def test_get_calendar_path_oserror(capsys):
+def test_get_calendar_path_oserror(capsys) -> None:
     """Test get_calendar_path when OSError occurs."""
-    with patch('pathlib.Path.resolve', side_effect=OSError("Permission denied")):
+    with patch("pathlib.Path.resolve", side_effect=OSError("Permission denied")):
         with pytest.raises(SystemExit) as exc_info:
             calendar_analyzer.get_calendar_path("/some/path")
 
@@ -513,8 +524,8 @@ def test_get_calendar_path_oserror(capsys):
         assert "Error processing path: Permission denied" in out
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys) -> None:
     """Test auto-discovery when calendar files are found."""
     # Create a temporary directory structure
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -533,7 +544,7 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys):
         new_calendar.write_text("new calendar content")
 
         # Make old_calendar older by changing its modification time
-        old_time = os.path.getmtime(new_calendar) - 3600  # 1 hour ago
+        old_time = new_calendar.stat().st_mtime - 3600  # 1 hour ago
         os.utime(old_calendar, (old_time, old_time))
 
         result = calendar_analyzer.get_calendar_path()
@@ -548,8 +559,8 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys):
         assert f"Selected most recent calendar file: {new_calendar}" in out
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_no_files(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_no_files(mock_home, capsys) -> None:
     """Test auto-discovery when no calendar files are found."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
@@ -570,8 +581,8 @@ def test_get_calendar_path_auto_discovery_no_files(mock_home, capsys):
         assert "Please export your calendar from the Calendar app:" in out
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_nonexistent_dirs(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_nonexistent_dirs(mock_home, capsys) -> None:
     """Test auto-discovery when directories don't exist."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
@@ -589,8 +600,8 @@ def test_get_calendar_path_auto_discovery_nonexistent_dirs(mock_home, capsys):
         assert "Error: No calendar files found in any of the expected locations." in out
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys) -> None:
     """Test auto-discovery with multiple calendar file types."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
@@ -615,7 +626,7 @@ def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys)
 
         # Should find one of the files (the most recent one)
         assert result.exists()
-        assert result.suffix in ['.ics', '.icbu', '.sqlitedb']
+        assert result.suffix in [".ics", ".icbu", ".sqlitedb"]
 
         out = capsys.readouterr().out
         # The function prints found files per directory, not total
@@ -623,8 +634,8 @@ def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys)
         assert "✓ Found 1 calendar files" in out  # Documents
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_many_files(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_many_files(mock_home, capsys) -> None:
     """Test auto-discovery with many calendar files (tests truncation)."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
@@ -648,8 +659,8 @@ def test_get_calendar_path_auto_discovery_many_files(mock_home, capsys):
         assert "... and 2 more" in out  # Should show first 5 + "... and 2 more"
 
 
-@patch('pathlib.Path.home')
-def test_get_calendar_path_auto_discovery_subdirectories(mock_home, capsys):
+@patch("pathlib.Path.home")
+def test_get_calendar_path_auto_discovery_subdirectories(mock_home, capsys) -> None:
     """Test auto-discovery finds files in subdirectories."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
@@ -672,7 +683,7 @@ def test_get_calendar_path_auto_discovery_subdirectories(mock_home, capsys):
         assert f"Selected most recent calendar file: {nested_calendar}" in out
 
 
-def test_analyze_calendar_icbu_with_sqlite(capsys):
+def test_analyze_calendar_icbu_with_sqlite(capsys) -> None:
     """Test ICBU file handling with SQLite database inside."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         icbu_path = Path(tmp_dir) / "backup.icbu"
@@ -683,21 +694,20 @@ def test_analyze_calendar_icbu_with_sqlite(capsys):
         sqlite_path.write_text("fake sqlite content")
 
         # Mock the analyze_sqlite_calendar function
-        with patch('calendar_analyzer.analyze_sqlite_calendar') as mock_sqlite:
-            mock_sqlite.return_value = (
-                [], {'total_meetings': 0, 'total_hours': 0})
+        with patch("calendar_analyzer.analyze_sqlite_calendar") as mock_sqlite:
+            mock_sqlite.return_value = ([], {"total_meetings": 0, "total_hours": 0})
 
             result = calendar_analyzer.analyze_calendar(icbu_path)
 
             # Should have called analyze_sqlite_calendar
             mock_sqlite.assert_called_once_with(sqlite_path, None, None)
-            assert result == ([], {'total_meetings': 0, 'total_hours': 0})
+            assert result == ([], {"total_meetings": 0, "total_hours": 0})
 
             out = capsys.readouterr().out
             assert f"Found SQLite database in ICBU backup: {sqlite_path}" in out
 
 
-def test_analyze_calendar_icbu_with_ics_fallback(capsys):
+def test_analyze_calendar_icbu_with_ics_fallback(capsys) -> None:
     """Test ICBU file handling with ICS fallback when no SQLite."""
     # Create ICS content
     ics_content = textwrap.dedent("""
@@ -722,17 +732,17 @@ def test_analyze_calendar_icbu_with_ics_fallback(capsys):
         meetings, stats = calendar_analyzer.analyze_calendar(
             icbu_path,
             datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
         )
 
-        assert stats['total_meetings'] == 1
-        assert meetings[0]['summary'] == 'ICBU Test Meeting'
+        assert stats["total_meetings"] == 1
+        assert meetings[0]["summary"] == "ICBU Test Meeting"
 
         out = capsys.readouterr().out
         assert f"Found ICS file in ICBU backup: {ics_path}" in out
 
 
-def test_analyze_calendar_icbu_no_calendar_data(capsys):
+def test_analyze_calendar_icbu_no_calendar_data(capsys) -> None:
     """Test ICBU file handling when no calendar data is found."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         icbu_path = Path(tmp_dir) / "backup.icbu"
@@ -753,14 +763,14 @@ def test_analyze_calendar_icbu_no_calendar_data(capsys):
         assert "metadata.plist" in out
 
 
-def test_analyze_calendar_icbu_directory_listing_error(capsys):
+def test_analyze_calendar_icbu_directory_listing_error(capsys) -> None:
     """Test ICBU directory listing error handling."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         icbu_path = Path(tmp_dir) / "backup.icbu"
         icbu_path.mkdir()
 
         # Mock iterdir to raise OSError
-        with patch.object(Path, 'iterdir', side_effect=OSError("Permission denied")):
+        with patch.object(Path, "iterdir", side_effect=OSError("Permission denied")):
             with pytest.raises(SystemExit) as exc_info:
                 calendar_analyzer.analyze_calendar(icbu_path)
 
@@ -769,7 +779,7 @@ def test_analyze_calendar_icbu_directory_listing_error(capsys):
             assert "Error listing directory contents: Permission denied" in out
 
 
-def test_analyze_calendar_with_malformed_ics():
+def test_analyze_calendar_with_malformed_ics() -> None:
     """Test analyze_calendar with malformed ICS content."""
     malformed_ics = "This is not valid ICS content"
 
@@ -782,14 +792,14 @@ def test_analyze_calendar_with_malformed_ics():
         calendar_analyzer.analyze_calendar(Path(tmp_path))
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_analyze_calendar_default_date_range():
+def test_analyze_calendar_default_date_range() -> None:
     """Test analyze_calendar with default date ranges (no start/end specified)."""
     # Use a recent date that would be within the default 365-day range
-    recent_date = datetime.now() - timedelta(days=30)  # 30 days ago
-    recent_date_str = recent_date.strftime('%Y%m%dT%H%M%SZ')
+    recent_date = datetime.now(UTC) - timedelta(days=30)  # 30 days ago
+    recent_date_str = recent_date.strftime("%Y%m%dT%H%M%SZ")
 
     ics_content = textwrap.dedent(f"""
     BEGIN:VCALENDAR
@@ -810,15 +820,15 @@ def test_analyze_calendar_default_date_range():
     # Should process the calendar and find the recent meeting
     assert isinstance(meetings, list)
     assert isinstance(stats, dict)
-    assert stats['total_meetings'] == 1
-    assert stats['total_hours'] == 1.0
-    assert meetings[0]['summary'] == 'Recent Meeting'
+    assert stats["total_meetings"] == 1
+    assert stats["total_hours"] == 1.0
+    assert meetings[0]["summary"] == "Recent Meeting"
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_analyze_calendar_with_non_datetime_events():
+def test_analyze_calendar_with_non_datetime_events() -> None:
     """Test analyze_calendar with events that have non-datetime start times."""
     # ICS with all-day event (DATE instead of DATETIME)
     ics_content = textwrap.dedent("""
@@ -841,18 +851,18 @@ def test_analyze_calendar_with_non_datetime_events():
     meetings, stats = calendar_analyzer.analyze_calendar(
         Path(tmp_path),
         datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
     )
 
     # Should only process the datetime event, not the all-day event
-    assert stats['total_meetings'] == 1
-    assert meetings[0]['summary'] == 'Timed Event'
+    assert stats["total_meetings"] == 1
+    assert meetings[0]["summary"] == "Timed Event"
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()
 
 
-def test_analyze_calendar_duration_parsing_edge_cases():
+def test_analyze_calendar_duration_parsing_edge_cases() -> None:
     """Test various duration parsing edge cases."""
     # Test various duration formats that might cause issues
     ics_content = textwrap.dedent("""
@@ -881,17 +891,17 @@ def test_analyze_calendar_duration_parsing_edge_cases():
     meetings, stats = calendar_analyzer.analyze_calendar(
         Path(tmp_path),
         datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
     )
 
     # Should process all events, with fallback durations where needed
-    assert stats['total_meetings'] == 3
+    assert stats["total_meetings"] == 3
 
     # Find each meeting and check duration handling
-    meeting_summaries = [m['summary'] for m in meetings]
-    assert '30 Minute Meeting' in meeting_summaries
-    assert 'All Day Event with Duration' in meeting_summaries
-    assert 'Invalid Duration Meeting' in meeting_summaries
+    meeting_summaries = [m["summary"] for m in meetings]
+    assert "30 Minute Meeting" in meeting_summaries
+    assert "All Day Event with Duration" in meeting_summaries
+    assert "Invalid Duration Meeting" in meeting_summaries
 
     # Clean up
-    os.unlink(tmp_path)
+    Path(tmp_path).unlink()

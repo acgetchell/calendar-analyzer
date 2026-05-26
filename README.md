@@ -3,8 +3,6 @@
 [![CI](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/acgetchell/calendar-analyzer/graph/badge.svg?token=UWRe2AcNnm)](https://codecov.io/github/acgetchell/calendar-analyzer)
 [![CodeQL Advanced](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml)
-[![Pylint](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/pylint.yml)
-[![Bandit](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/bandit.yml)
 
 A simple Python script that analyzes your Apple Calendar data and provides a summary of your meetings.
 
@@ -21,37 +19,29 @@ A simple Python script that analyzes your Apple Calendar data and provides a sum
 
 ## Prerequisites
 
-This project uses `uv`, a fast Python package installer and resolver. Install it using:
+This project uses `uv` for Python dependencies and `just` for local workflows. The setup scripts install or verify the required tools, including script linters, and sync development dependencies.
 
 ```bash
-# Homebrew (recommended for macOS)
-brew install uv
-
-# Official installer
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Using pip
-pip install uv
+# macOS
+scripts/setup-macos.sh
 ```
+
+```powershell
+# Windows
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup-windows.ps1
+```
+
+Both scripts run `just ci` by default. Use `--no-check` on macOS or `-NoCheck` on Windows to only install/sync dependencies.
+See [scripts/README.md](scripts/README.md) for script linting and formatting details.
 
 ## Setup
 
-1. **Ensure Python 3.9+ is installed**
-2. **Create and activate a virtual environment:**
+1. **Run the platform setup script above**
+2. **For later dependency refreshes:**
 
    ```bash
-   uv venv
-   source .venv/bin/activate  # On macOS/Linux
-   ```
-
-3. **Install dependencies:**
-
-   ```bash
-   # Main dependencies only
-   uv sync
-   
-   # With development dependencies (for contributing)
-   uv sync --group dev
+   just setup
    ```
 
 ## Exporting Your Calendar
@@ -62,74 +52,58 @@ pip install uv
 4. Run the analyzer:
 
    ```bash
-   python calendar_analyzer.py --calendar ~/Documents/your-calendar.ics
+   uv run calendar-analyzer --calendar ~/Documents/your-calendar.ics
    ```
 
 ## Usage
 
-Activate your virtual environment and run:
-
 ```bash
 # Basic usage (analyzes past year)
-python calendar_analyzer.py
+uv run calendar-analyzer
 
 # Analyze specific date range
-python calendar_analyzer.py --start-date 2024-01-01 --end-date 2024-03-31
+uv run calendar-analyzer --start-date 2024-01-01 --end-date 2024-03-31
 
 # Analyze last 90 days
-python calendar_analyzer.py --days 90
+uv run calendar-analyzer --days 90
 
 # Specify custom calendar file
-python calendar_analyzer.py --calendar /path/to/your/calendar.ics
+uv run calendar-analyzer --calendar /path/to/your/calendar.ics
 
 # Show top 10 meeting titles
-python calendar_analyzer.py --titles 10
+uv run calendar-analyzer --titles 10
 
 # Save results to file
-python calendar_analyzer.py --output analysis.txt
+uv run calendar-analyzer --output analysis.txt
 ```
 
 The script automatically finds your most recent calendar file (unless specified), analyzes the date range, and displays or saves results.
 
 ## Development
 
-### Code Quality
-
-Uses [pylint](https://pylint.org/) with minimum score 8.9/10:
+### Workflows
 
 ```bash
-pylint calendar_analyzer.py
+# Sync development dependencies
+just setup
+
+# Run Ruff, Ty, typos, TOML checks, script checks, and tests
+just check
+
+# Apply Ruff, Taplo, and shell script auto-fixes
+just fix
+
+# Run tests only
+just test
+
+# Generate coverage.xml and terminal coverage
+just coverage
+
+# Run the full local CI workflow
+just ci
 ```
 
-### Testing
-
-Uses [pytest](https://pytest.org/):
-
-```bash
-# Run all tests
-pytest
-
-# Verbose output
-pytest -v
-
-# Specific test file or function
-pytest tests/test_calendar_analyzer.py
-pytest tests/test_calendar_analyzer.py::test_analyze_mock_ics
-```
-
-### Security Scanning
-
-Uses [Bandit](https://bandit.readthedocs.io/):
-
-```bash
-# Scan main application
-bandit -r calendar_analyzer.py
-
-# Scan tests (skip assert warnings)
-bandit -r tests/ --skip B101
-```
-
-**Security Features:** No hardcoded secrets, secure file handling, input validation, local processing only.
+The local workflow mirrors CI: `just ci` runs all checks plus coverage.
 
 ### Dependency Management
 
@@ -149,15 +123,13 @@ uv sync              # main only
 
 ### Spell Checking
 
-Uses [cspell](https://cspell.org/):
+Uses [typos-cli](https://github.com/crate-ci/typos):
 
 ```bash
-# Install and run
-npm install -g cspell
-cspell "**/*.{md,py,txt}"
+just spell-check
 ```
 
-Configured in `cspell.json`. Includes Cursor/VS Code integration via "Code Spell Checker" extension.
+Configured in `typos.toml`.
 
 ## Note
 

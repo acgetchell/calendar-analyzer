@@ -1,0 +1,19 @@
+# Configuration for typos-cli (https://github.com/crate-ci/typos).
+
+[files]
+extend-exclude = [
+  ".git/**",
+  ".venv/**",
+  ".pytest_cache/**",
+  ".ruff_cache/**",
+  "__pycache__/**",
+  "htmlcov/**",
+  "coverage.xml",
+  "analysis.txt",
+]
+
+[default.extend-words]
+ICAL = "ICAL"
+VEVENT = "VEVENT"
+dtstart = "dtstart"
+sqlitedb = "sqlitedb"
