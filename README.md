@@ -83,27 +83,32 @@ The script automatically finds your most recent calendar file (unless specified)
 
 ### Workflows
 
-```bash
-# Sync development dependencies
-just setup
+Common recipes are listed alphabetically:
 
+```bash
 # Run Ruff, Ty, typos, TOML checks, script checks, and tests
 just check
 
-# Apply Ruff, Taplo, and shell script auto-fixes
-just fix
-
-# Run tests only
-just test
+# Run the full local CI workflow
+just ci
 
 # Generate coverage.xml and terminal coverage
 just coverage
 
-# Run the full local CI workflow
-just ci
+# Apply Ruff, Taplo, and shell script auto-fixes
+just fix
+
+# Run pip-audit and repository Semgrep rules
+just security
+
+# Sync development dependencies
+just setup
+
+# Run tests only
+just test
 ```
 
-The local workflow mirrors CI: `just ci` runs all checks plus coverage.
+The local workflow mirrors CI: `just ci` runs all checks, security scans, and coverage.
 
 ### Dependency Management
 

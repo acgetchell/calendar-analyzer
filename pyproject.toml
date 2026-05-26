@@ -21,7 +21,15 @@ dependencies = ["icalendar>=6.3.1", "pandas>=2.3.0"]
 calendar-analyzer = "calendar_analyzer:main"
 
 [dependency-groups]
-dev = ["pytest>=8.2.1", "pytest-cov>=6.2.1", "ruff>=0.12.11", "ty>=0.0.8"]
+dev = [
+  "pip-audit>=2.10.0",
+  "pygments>=2.20.0",
+  "pytest>=9.0.3",
+  "pytest-cov>=6.2.1",
+  "ruff>=0.12.11",
+  "semgrep>=1.163.0",
+  "ty>=0.0.8",
+]
 
 [tool.ruff]
 line-length = 120

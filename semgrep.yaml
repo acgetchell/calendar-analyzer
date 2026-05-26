@@ -1,0 +1,94 @@
+---
+# Repository-owned Semgrep rules for calendar-analyzer.
+#
+# Keep this small and project-specific. Broad community rules overlap with
+# CodeQL, Ruff security rules, pip-audit, ShellCheck, and PSScriptAnalyzer.
+
+rules:
+  - id: calendar-analyzer.github-actions.external-action-sha-pinned
+    languages:
+      - regex
+    severity: WARNING
+    message: "Pin external GitHub Actions to a full 40-character commit SHA."
+    metadata:
+      category: security
+      rationale: "Moving tags can change workflow behavior without review."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@(?![a-fA-F0-9]{40}(?:\s+#|$))[^\s#]+'
+
+  - id: calendar-analyzer.github-actions.external-action-approved-allowlist
+    languages:
+      - regex
+    severity: WARNING
+    message: "Use only approved external GitHub Actions, or update the repository allowlist deliberately."
+    metadata:
+      category: security
+      rationale: "A small allowlist keeps workflow supply-chain review explicit."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)(?!(?:actions/checkout|actions/setup-python|astral-sh/setup-uv|taiki-e/install-action|github/codeql-action/(?:init|analyze)|codecov/codecov-action)@)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@'
+
+  - id: calendar-analyzer.github-actions.external-action-version-comment
+    languages:
+      - regex
+    severity: WARNING
+    message: "Keep a readable version comment next to external GitHub Action SHA pins."
+    metadata:
+      category: maintainability
+      rationale: "Version comments make Dependabot updates and human review manageable."
+    paths:
+      include:
+        - "/.github/workflows/**/*.yml"
+        - "/.github/workflows/**/*.yaml"
+    patterns:
+      - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@[a-fA-F0-9]{40}\s*$'
+
+  - id: calendar-analyzer.python.sqlite-connect-without-closing
+    languages:
+      - python
+    severity: WARNING
+    message: "Wrap sqlite3.connect(...) with contextlib.closing(...) so Windows releases database file handles."
+    metadata:
+      category: correctness
+      rationale: "sqlite3.Connection context managers manage transactions but do not close the connection."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+        - "/tests/**/*.py"
+    pattern: |
+      with sqlite3.connect(...) as $CONN:
+          ...
+
+  - id: calendar-analyzer.python.no-broad-exception
+    languages:
+      - python
+    severity: WARNING
+    message: "Catch a specific exception type instead of broad Exception."
+    metadata:
+      category: maintainability
+      rationale: "Calendar parsing and CLI errors should surface expected failure modes explicitly."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+        - "/tests/**/*.py"
+    pattern-regex: '^\s*except\s+Exception(?:\s+as\s+\w+)?\s*:'
+
+  - id: calendar-analyzer.python.no-raw-exception-in-tests
+    languages:
+      - python
+    severity: WARNING
+    message: "Raise a specific exception type in tests instead of raw Exception."
+    metadata:
+      category: maintainability
+      rationale: "Typed exceptions make expected failure paths easier to diagnose."
+    paths:
+      include:
+        - "/tests/**/*.py"
+    pattern: raise Exception(...)
