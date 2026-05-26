@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from contextlib import closing
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
@@ -373,7 +374,7 @@ def _fetch_sqlite_calendar_rows(
     start_seconds: int,
     end_seconds: int,
 ) -> list[tuple[str | None, int, int]]:
-    with sqlite3.connect(calendar_path) as conn:
+    with closing(sqlite3.connect(calendar_path)) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """

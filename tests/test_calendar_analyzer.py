@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import textwrap
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -718,12 +719,13 @@ def test_analyze_calendar_with_sqlite_file(capsys) -> None:
         start_seconds = int((start_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
         end_seconds = int((end_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
 
-        with sqlite3.connect(sqlite_path) as conn:
+        with closing(sqlite3.connect(sqlite_path)) as conn:
             conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
             conn.execute(
                 "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
                 ("SQLite Meeting", start_seconds, end_seconds),
             )
+            conn.commit()
 
         meetings, stats = calendar_analyzer.analyze_calendar(
             sqlite_path,
@@ -746,12 +748,13 @@ def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:
         start_seconds = int((start_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
         end_seconds = int((end_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
 
-        with sqlite3.connect(sqlite_path) as conn:
+        with closing(sqlite3.connect(sqlite_path)) as conn:
             conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
             conn.execute(
                 "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
                 (None, start_seconds, end_seconds),
             )
+            conn.commit()
 
         meetings, stats = calendar_analyzer.analyze_sqlite_calendar(
             sqlite_path,
