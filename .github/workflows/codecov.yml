@@ -2,33 +2,60 @@ name: Run Tests and Upload Coverage
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  JUST_VERSION: "1.51.0"
+  UV_VERSION: "0.11.15"
+
 jobs:
-  test:
+  coverage:
+    name: Coverage
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.11"
 
       - name: Install uv
-        run: pip install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install just
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: just@${{ env.JUST_VERSION }}
+
+      - name: Install shell script tools
+        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2.79.1
+        with:
+          tool: shellcheck,shfmt
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
 
       - name: Sync project dependencies
-        run: uv sync --dev
+        run: uv sync --locked --group dev
 
       - name: Run tests with pytest-cov
-        run: uv run pytest --cov=calendar_analyzer --cov-report=xml
+        run: just coverage
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml

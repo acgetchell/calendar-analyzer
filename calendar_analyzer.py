@@ -1,35 +1,57 @@
-#!/usr/bin/env python3
-"""
-Calendar Analyzer - A tool to analyze calendar events and generate summaries.
+"""Analyze Apple Calendar exports and summarize meeting patterns."""
 
-This module provides functionality to parse calendar files (ICS and SQLite formats)
-and generate detailed statistics about meetings and events.
-"""
-import sys
+from __future__ import annotations
+
 import argparse
 import sqlite3
-from collections import defaultdict
-from datetime import datetime, timedelta
+import sys
+import tempfile
+from contextlib import closing
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
+from zoneinfo import ZoneInfo
 
-from icalendar import Calendar
 import pandas as pd
-from dateutil import tz
+from icalendar import Calendar
 
-# Define timezone constants
-PACIFIC = tz.gettz('America/Los_Angeles')
-UTC = tz.UTC
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Iterable
+
+PACIFIC = ZoneInfo("America/Los_Angeles")
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
+CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb")
+DEFAULT_DAYS_BACK = 365
+DEFAULT_DURATION_HOURS = 1.0
 
 
-def convert_to_pacific(dt):
-    """Convert a datetime to Pacific time."""
+class Meeting(TypedDict):
+    """Normalized calendar meeting data used for reporting."""
+
+    date: date
+    time: time
+    summary: str
+    duration_hours: float
+
+
+class MeetingStats(TypedDict):
+    """Aggregate meeting counters."""
+
+    total_meetings: int
+    total_hours: float
+
+
+CalendarAnalysis = tuple[list[Meeting], MeetingStats]
+
+
+def convert_to_pacific(dt: datetime) -> datetime:
+    """Convert a datetime to Pacific time, treating naive values as UTC."""
     if dt.tzinfo is None:
-        # If no timezone info, assume UTC
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(PACIFIC)
 
 
-def print_calendar_export_instructions():
+def print_calendar_export_instructions() -> None:
     """Print instructions for exporting a calendar file."""
     print("\nPlease export your calendar from the Calendar app:")
     print("1. Open the Calendar app")
@@ -37,252 +59,91 @@ def print_calendar_export_instructions():
     print("3. Go to File > Export")
     print("4. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
-    print("python calendar_analyzer.py --calendar /path/to/your/calendar.ics")
+    print("uv run calendar-analyzer --calendar /path/to/your/calendar.ics")
 
 
-def get_calendar_path(calendar_file=None):
-    """Get the path to the calendar file."""
-    if calendar_file:
-        try:
-            calendar_path = Path(calendar_file).resolve()
-            print(f"Looking for calendar at: {calendar_path}")
-            print(f"Path exists: {calendar_path.exists()}")
-            if calendar_path.exists():
-                print(f"Is directory: {calendar_path.is_dir()}")
-                if calendar_path.is_dir():
-                    print("Directory contents:")
-                    for item in calendar_path.iterdir():
-                        print(f"  - {item.name}")
-            return calendar_path
-        except OSError as e:
-            print(f"Error processing path: {e}")
-            sys.exit(1)
+def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
+    """Get the requested calendar path or discover the newest local calendar file."""
+    if calendar_file is not None:
+        return _resolve_requested_calendar_path(calendar_file)
 
-    # If no file specified, try to find calendar files in common locations
-    home = Path.home()
-    possible_paths = [
-        home / "Library/Calendars",  # Default macOS Calendar location
-        home / "Library/Application Support/Calendar",  # Alternative location
-        home / "Library/Application Support/Apple/Calendar",  # Another possible location
-        home / "Documents",  # Common export location
-        home / "Downloads"   # Common export location
-    ]
-
-    print("\nSearching for calendar files in:")
-    for path in possible_paths:
-        print(f"- {path}")
-        if path.exists():
-            print("  ✓ Directory exists")
-            # List all calendar files in this directory and subdirectories
-            calendar_files = []
-            for ext in ['*.ics', '*.icbu', '*.sqlitedb']:  # Search for calendar files
-                calendar_files.extend(list(path.rglob(ext)))
-
-            if calendar_files:
-                print(f"  ✓ Found {len(calendar_files)} calendar files")
-                for file in calendar_files[:5]:  # Show first 5 files
-                    print(f"    - {file}")
-                if len(calendar_files) > 5:
-                    print(f"    ... and {len(calendar_files) - 5} more")
-            else:
-                print("  ✗ No calendar files found")
-        else:
-            print("  ✗ Directory does not exist")
-
-    # Try to find calendar files in all possible locations
-    all_calendar_files = []
-    for path in possible_paths:
-        if path.exists():
-            for ext in ['*.ics', '*.icbu', '*.sqlitedb']:
-                all_calendar_files.extend(list(path.rglob(ext)))
-
-    if not all_calendar_files:
+    calendar_files = _discover_calendar_files(_candidate_calendar_directories(Path.home()))
+    if not calendar_files:
         print("\nError: No calendar files found in any of the expected locations.")
         print_calendar_export_instructions()
-        sys.exit(1)
+        raise_system_exit()
 
-    # Get the most recent calendar file
-    latest_calendar = max(all_calendar_files, key=lambda x: x.stat().st_mtime)
+    latest_calendar = max(calendar_files, key=lambda path: (path.stat().st_mtime, path.as_posix()))
     print(f"\nSelected most recent calendar file: {latest_calendar}")
     return latest_calendar
 
 
-def analyze_calendar(calendar_path, start_date=None, end_date=None, days_back=365):
+def analyze_calendar(
+    calendar_path: Path,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    days_back: int = DEFAULT_DAYS_BACK,
+) -> CalendarAnalysis:
     """Analyze calendar events from the specified date range."""
+    if calendar_path.suffix.lower() == ".sqlitedb":
+        return analyze_sqlite_calendar(calendar_path, start_date, end_date, days_back)
+    if calendar_path.suffix.lower() == ".icbu":
+        sqlite_db_path = calendar_path / "Calendar.sqlitedb"
+        if sqlite_db_path.exists():
+            print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
+            return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date, days_back)
+
+    ics_path = _resolve_ics_calendar_path(calendar_path)
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+
     try:
-        # Handle different calendar file formats
-        if calendar_path.suffix.lower() == '.sqlitedb':
-            return analyze_sqlite_calendar(calendar_path, start_date, end_date)
-        if calendar_path.suffix.lower() == '.icbu':
-            # .icbu files are actually directories containing calendar data
-            # Look for SQLite database first, then fall back to ICS files
-            sqlite_db_path = calendar_path / 'Calendar.sqlitedb'
-            if sqlite_db_path.exists():
-                print(
-                    f"Found SQLite database in ICBU backup: {sqlite_db_path}")
-                return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date)
+        calendar = _read_ics_calendar(ics_path)
+    except OSError as error:
+        print(f"Error reading calendar file: {error}")
+        raise_system_exit()
+    except ValueError as error:
+        print(f"Error parsing calendar file: {error}")
+        raise_system_exit()
 
-            # Look for ICS files as fallback
-            if ics_files := list(calendar_path.glob('*.ics')):
-                calendar_path = ics_files[0]  # Use the first ICS file found
-                print(f"Found ICS file in ICBU backup: {calendar_path}")
-            else:
-                print(
-                    f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
-                # List what's actually in the directory to help debug
-                print("Contents of ICBU directory:")
-                try:
-                    for item in calendar_path.iterdir():
-                        print(f"  - {item.name}")
-                except OSError as e:
-                    print(f"  Error listing directory contents: {e}")
-                sys.exit(1)
-
-        with open(calendar_path, 'rb') as f:
-            cal = Calendar.from_ical(f.read())
-
-        # Calculate date range
-        if end_date is None:
-            end_date = datetime.now(PACIFIC)
-        if start_date is None:
-            start_date = end_date - timedelta(days=days_back)
-
-        # Initialize data structures
-        meetings = []
-        meeting_stats = defaultdict(int)
-
-        # Process events
-        for event in cal.walk('VEVENT'):
-            start = event.get('dtstart').dt
-            if isinstance(start, datetime):
-                # Convert to Pacific time
-                start = convert_to_pacific(start)
-                if start_date <= start <= end_date:
-                    summary = str(event.get('summary', 'No Title'))
-                    duration = event.get('duration')
-                    if duration is not None:
-                        if isinstance(duration, timedelta):
-                            duration_hours = duration.total_seconds() / 3600
-                        else:
-                            # Handle icalendar duration objects
-                            try:
-                                duration_hours = duration.dt.total_seconds() / 3600
-                            except AttributeError:
-                                # Fall back to parsing duration string
-                                duration_str = str(duration)
-                                if duration_str.startswith('PT') and duration_str.endswith('H'):
-                                    duration_hours = float(duration_str[2:-1])
-                                else:
-                                    duration_hours = 1
-                    else:
-                        duration_hours = 1
-
-                    meetings.append({
-                        'date': start.date(),
-                        'time': start.time(),
-                        'summary': summary,
-                        'duration_hours': duration_hours
-                    })
-
-                    # Update stats
-                    meeting_stats['total_meetings'] += 1
-                    meeting_stats['total_hours'] += duration_hours
-
-        return meetings, meeting_stats
-
-    except OSError as e:
-        print(f"Error reading calendar file: {e}")
-        sys.exit(1)
+    return _analyze_ics_events(calendar, start_date, end_date)
 
 
-def analyze_sqlite_calendar(calendar_path, start_date=None, end_date=None):
+def analyze_sqlite_calendar(
+    calendar_path: Path,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    days_back: int = DEFAULT_DAYS_BACK,
+) -> CalendarAnalysis:
     """Analyze calendar events from a SQLite database."""
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+    start_seconds = int((start_date - APPLE_EPOCH).total_seconds())
+    end_seconds = int((end_date - APPLE_EPOCH).total_seconds())
+
     try:
-        conn = sqlite3.connect(calendar_path)
-        cursor = conn.cursor()
+        rows = _fetch_sqlite_calendar_rows(calendar_path, start_seconds, end_seconds)
+    except sqlite3.Error as error:
+        print(f"Error reading SQLite calendar: {error}")
+        raise_system_exit()
 
-        # Calculate date range
-        if end_date is None:
-            end_date = datetime.now(PACIFIC)
-        if start_date is None:
-            start_date = end_date - timedelta(days=365)
-
-        # Convert dates to Apple's calendar format (seconds since 2001-01-01)
-        apple_epoch = datetime(2001, 1, 1, tzinfo=UTC)
-        start_seconds = int((start_date - apple_epoch).total_seconds())
-        end_seconds = int((end_date - apple_epoch).total_seconds())
-
-        # Query calendar events (no item_type filter)
-        cursor.execute("""
-            SELECT 
-                summary,
-                start_date,
-                end_date
-            FROM CalendarItem
-            WHERE start_date >= ? AND start_date <= ?
-        """, (start_seconds, end_seconds))
-
-        meetings = []
-        meeting_stats = defaultdict(int)
-
-        for row in cursor.fetchall():
-            summary, start_seconds, end_seconds = row
-            # If you want to filter out non-events, add logic here
-            # For now, we assume all rows are events
-
-            # Convert Apple's calendar format to datetime
-            start_dt = apple_epoch + timedelta(seconds=start_seconds)
-            end_dt = apple_epoch + timedelta(seconds=end_seconds)
-
-            # Convert to Pacific time
-            start_dt = convert_to_pacific(start_dt)
-            end_dt = convert_to_pacific(end_dt)
-
-            # Calculate duration in hours
-            duration_hours = (end_dt - start_dt).total_seconds() / 3600
-
-            meetings.append({
-                'date': start_dt.date(),
-                'time': start_dt.time(),
-                'summary': summary or 'No Title',
-                'duration_hours': duration_hours
-            })
-
-            # Update stats
-            meeting_stats['total_meetings'] += 1
-            meeting_stats['total_hours'] += duration_hours
-
-        conn.close()
-        return meetings, meeting_stats
-
-    except sqlite3.Error as e:
-        print(f"Error reading SQLite calendar: {e}")
-        sys.exit(1)
+    return _analyze_sqlite_rows(rows)
 
 
-def generate_summary(meetings, stats, num_titles=50):
+def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: int = 50) -> str:
     """Generate a summary of the calendar analysis."""
     if not meetings:
         return "No meetings found in the specified time period."
 
-    # Convert to DataFrame for easier analysis
     df = pd.DataFrame(meetings)
+    start_date = df["date"].min()
+    end_date = df["date"].max()
+    date_range_days = max((end_date - start_date).days, 1)
+    avg_meetings_per_day = stats["total_meetings"] / date_range_days
+    avg_meeting_duration = stats["total_hours"] / stats["total_meetings"]
 
-    # Calculate additional statistics
-    avg_meetings_per_day = stats['total_meetings'] / 365
-    avg_meeting_duration = stats['total_hours'] / stats['total_meetings']
-
-    # Get current Pacific timezone info
     now = datetime.now(PACIFIC)
     is_dst = now.dst() != timedelta(0)
     timezone_name = "PDT" if is_dst else "PST"
 
-    # Get date range
-    start_date = df['date'].min()
-    end_date = df['date'].max()
-    date_range_days = (end_date - start_date).days
-
-    # Generate summary
     summary = [
         f"📅 Calendar Analysis Summary (All times in Pacific Time - Currently {timezone_name})",
         "=" * 70,
@@ -303,101 +164,360 @@ def generate_summary(meetings, stats, num_titles=50):
         f"\nTop 5 Most Common Meeting Times ({timezone_name}):",
     ]
 
-    # Add most common meeting times
-    time_counts = df['time'].value_counts().head()
+    time_counts = df["time"].value_counts().head()
     summary.extend(
-        f"- {time.strftime('%I:%M %p')}: {count} meetings" for time, count in time_counts.items())
+        f"- {meeting_time.strftime('%I:%M %p')}: {count} meetings" for meeting_time, count in time_counts.items()
+    )
+    summary.extend([f"\nTop {num_titles} Most Frequent Meeting Titles:", "-" * 30])
 
-    # Add most frequent meeting titles
-    summary.extend([
-        f"\nTop {num_titles} Most Frequent Meeting Titles:",
-        "-" * 30
-    ])
-
-    # Get meeting title frequencies and sort
-    title_counts = df['summary'].value_counts().head(num_titles)
+    title_counts = df["summary"].value_counts().head(num_titles)
     for title, count in title_counts.items():
-        # Truncate long titles to keep the output readable
-        display_title = title[:100] + "..." if len(title) > 100 else title
+        display_title = f"{title[:100]}..." if len(title) > 100 else title
         summary.append(f"{count:4d} | {display_title}")
 
     return "\n".join(summary)
 
 
-def main():
-    """Main function to run the calendar analyzer."""
-    parser = argparse.ArgumentParser(
-        description='Analyze calendar events from a specified date range.'
-    )
-    parser.add_argument(
-        '--calendar', help='Path to the exported calendar file (.ics)')
-    parser.add_argument(
-        '--start-date', help='Start date for analysis (YYYY-MM-DD)')
-    parser.add_argument(
-        '--end-date', help='End date for analysis (YYYY-MM-DD)')
-    parser.add_argument(
-        '--days', type=int, default=365,
-        help='Number of days to look back from end date (default: 365)'
-    )
-    parser.add_argument(
-        '--titles', type=int, default=50,
-        help='Number of meeting titles to display (default: 50)'
-    )
-    parser.add_argument(
-        '--output', help='Path to save the analysis summary (default: print to console)'
-    )
-    args = parser.parse_args()
-
-    # Parse dates if provided
-    start_date = None
-    end_date = None
-    if args.start_date:
-        try:
-            start_date = datetime.strptime(
-                args.start_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
-        except ValueError:
-            print("Error: Start date must be in YYYY-MM-DD format")
-            sys.exit(1)
-    if args.end_date:
-        try:
-            end_date = datetime.strptime(
-                args.end_date, '%Y-%m-%d').replace(tzinfo=PACIFIC)
-        except ValueError:
-            print("Error: End date must be in YYYY-MM-DD format")
-            sys.exit(1)
-
-    # Validate date range if both dates are provided
-    if start_date and end_date and end_date < start_date:
-        print("Error: End date cannot be before start date")
-        print(f"Start date: {start_date.strftime('%Y-%m-%d')}")
-        print(f"End date: {end_date.strftime('%Y-%m-%d')}")
-        sys.exit(1)
+def main() -> None:
+    """Run the calendar analyzer command-line interface."""
+    args = _parse_args()
+    start_date = _parse_date_argument(args.start_date, "Start")
+    end_date = _parse_date_argument(args.end_date, "End")
+    _validate_date_range(start_date, end_date)
 
     print("📊 Analyzing your calendar...")
-
-    # Get calendar path
     calendar_path = get_calendar_path(args.calendar)
     print(f"Found calendar at: {calendar_path}")
 
-    # Analyze calendar
-    meetings, stats = analyze_calendar(
-        calendar_path, start_date, end_date, args.days)
-
-    # Generate summary
+    meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
     summary = generate_summary(meetings, stats, args.titles)
+    _write_or_print_summary(summary, args.output)
 
-    # Output summary
-    if args.output:
+
+def raise_system_exit() -> NoReturn:
+    """Exit with the conventional CLI failure status."""
+    sys.exit(1)
+
+
+def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
+    """Resolve an explicitly supplied calendar path and print discovery details."""
+    try:
+        calendar_path = Path(calendar_file).resolve()
+    except OSError as error:
+        print(f"Error processing path: {error}")
+        raise_system_exit()
+
+    print(f"Looking for calendar at: {calendar_path}")
+    print(f"Path exists: {calendar_path.exists()}")
+    if calendar_path.exists():
+        print(f"Is directory: {calendar_path.is_dir()}")
+        if calendar_path.is_dir():
+            print("Directory contents:")
+            for item in calendar_path.iterdir():
+                print(f"  - {item.name}")
+
+    return calendar_path
+
+
+def _candidate_calendar_directories(home: Path) -> list[Path]:
+    """Return default directories searched for calendar exports."""
+    return [
+        home / "Library/Calendars",
+        home / "Library/Application Support/Calendar",
+        home / "Library/Application Support/Apple/Calendar",
+        home / "Documents",
+        home / "Downloads",
+    ]
+
+
+def _discover_calendar_files(paths: Iterable[Path]) -> list[Path]:
+    """Search candidate directories for supported calendar files."""
+    print("\nSearching for calendar files in:")
+    calendar_files: list[Path] = []
+    for path in paths:
+        files = _calendar_files_in_directory(path)
+        calendar_files.extend(files)
+        _print_directory_search_result(path, files)
+    return calendar_files
+
+
+def _calendar_files_in_directory(path: Path) -> list[Path]:
+    """Return supported calendar files found recursively in a directory."""
+    if not path.exists():
+        return []
+
+    calendar_files: list[Path] = []
+    for pattern in CALENDAR_PATTERNS:
+        calendar_files.extend(sorted(path.rglob(pattern)))
+    return calendar_files
+
+
+def _print_directory_search_result(path: Path, calendar_files: list[Path]) -> None:
+    """Print the calendar discovery result for a searched directory."""
+    print(f"- {path}")
+    if not path.exists():
+        print("  ✗ Directory does not exist")
+        return
+
+    print("  ✓ Directory exists")
+    if not calendar_files:
+        print("  ✗ No calendar files found")
+        return
+
+    print(f"  ✓ Found {len(calendar_files)} calendar files")
+    for calendar_file in calendar_files[:5]:
+        print(f"    - {calendar_file}")
+    if len(calendar_files) > 5:
+        print(f"    ... and {len(calendar_files) - 5} more")
+
+
+def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
+    """Return the ICS path to analyze, including the first ICS inside an ICBU backup."""
+    if calendar_path.suffix.lower() != ".icbu":
+        return calendar_path
+
+    if ics_files := sorted(calendar_path.glob("*.ics")):
+        ics_path = ics_files[0]
+        print(f"Found ICS file in ICBU backup: {ics_path}")
+        return ics_path
+
+    print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
+    _print_directory_contents(calendar_path, "Contents of ICBU directory:")
+    raise_system_exit()
+
+
+def _print_directory_contents(directory: Path, heading: str) -> None:
+    """Print directory contents for diagnostics without failing on listing errors."""
+    print(heading)
+    try:
+        for item in directory.iterdir():
+            print(f"  - {item.name}")
+    except OSError as error:
+        print(f"  Error listing directory contents: {error}")
+
+
+def _resolve_date_range(
+    start_date: datetime | None,
+    end_date: datetime | None,
+    days_back: int,
+) -> tuple[datetime, datetime]:
+    """Resolve optional date bounds into an inclusive analysis window."""
+    resolved_end_date = end_date or datetime.now(PACIFIC)
+    resolved_start_date = start_date or resolved_end_date - timedelta(days=days_back)
+    return resolved_start_date, resolved_end_date
+
+
+def _read_ics_calendar(calendar_path: Path) -> Calendar:
+    """Read and parse an ICS calendar file."""
+    with calendar_path.open("rb") as calendar_file:
+        return Calendar.from_ical(calendar_file.read())
+
+
+def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: datetime) -> CalendarAnalysis:
+    """Collect meetings and aggregate stats from VEVENT entries in a date range."""
+    meetings: list[Meeting] = []
+    stats = _empty_stats()
+
+    for event in calendar.walk("VEVENT"):
+        start = _event_start_datetime(event)
+        if start is None:
+            continue
+
+        start = convert_to_pacific(start)
+        if not start_date <= start <= end_date:
+            continue
+
+        duration_hours = _event_duration_hours(event, start)
+        meeting = _meeting_from_event(event, start, duration_hours)
+        meetings.append(meeting)
+        _update_stats(stats, duration_hours)
+
+    return meetings, stats
+
+
+def _event_start_datetime(event: Any) -> datetime | None:
+    """Return a VEVENT start datetime when the event has one."""
+    start = event.get("dtstart")
+    if start is None or not isinstance(start.dt, datetime):
+        return None
+    return start.dt
+
+
+def _event_duration_hours(event: Any, start: datetime) -> float:
+    """Resolve a VEVENT duration in hours from duration, dtend, or a default."""
+    duration = event.get("duration")
+    if isinstance(duration, timedelta):
+        return duration.total_seconds() / 3600
+
+    duration_dt = getattr(duration, "dt", None)
+    if isinstance(duration_dt, timedelta):
+        return duration_dt.total_seconds() / 3600
+
+    if duration is not None:
+        return _duration_string_hours(str(duration))
+
+    return _dtend_duration_hours(event, start) or DEFAULT_DURATION_HOURS
+
+
+def _duration_string_hours(duration: str) -> float:
+    """Parse simple ICS duration strings like PT1H into hours."""
+    if duration.startswith("PT") and duration.endswith("H"):
         try:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(summary)
-            print(f"\nAnalysis saved to: {args.output}")
-        except OSError as e:
-            print(f"Error saving to file: {e}")
-            sys.exit(1)
-    else:
+            return float(duration[2:-1])
+        except ValueError:
+            return DEFAULT_DURATION_HOURS
+    return DEFAULT_DURATION_HOURS
+
+
+def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
+    """Calculate event duration from dtend when it is available."""
+    end = event.get("dtend")
+    if end is None or not isinstance(end.dt, datetime):
+        return None
+
+    end_dt = convert_to_pacific(end.dt)
+    return (end_dt - start).total_seconds() / 3600
+
+
+def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> Meeting:
+    """Normalize a VEVENT into the meeting shape used by reporting."""
+    return {
+        "date": start.date(),
+        "time": start.time(),
+        "summary": str(event.get("summary", "No Title")),
+        "duration_hours": duration_hours,
+    }
+
+
+def _fetch_sqlite_calendar_rows(
+    calendar_path: Path,
+    start_seconds: int,
+    end_seconds: int,
+) -> list[tuple[str | None, int, int]]:
+    """Fetch SQLite calendar rows in the Apple-epoch date range."""
+    with closing(sqlite3.connect(calendar_path)) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                summary,
+                start_date,
+                end_date
+            FROM CalendarItem
+            WHERE start_date >= ? AND start_date <= ?
+            """,
+            (start_seconds, end_seconds),
+        )
+        return cursor.fetchall()
+
+
+def _analyze_sqlite_rows(rows: Iterable[tuple[str | None, int, int]]) -> CalendarAnalysis:
+    """Normalize SQLite calendar rows and aggregate meeting stats."""
+    meetings: list[Meeting] = []
+    stats = _empty_stats()
+
+    for summary, start_seconds, end_seconds in rows:
+        start_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=start_seconds))
+        end_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=end_seconds))
+        duration_hours = (end_dt - start_dt).total_seconds() / 3600
+        meetings.append(
+            {
+                "date": start_dt.date(),
+                "time": start_dt.time(),
+                "summary": summary or "No Title",
+                "duration_hours": duration_hours,
+            }
+        )
+        _update_stats(stats, duration_hours)
+
+    return meetings, stats
+
+
+def _empty_stats() -> MeetingStats:
+    """Create an empty meeting statistics accumulator."""
+    return {"total_meetings": 0, "total_hours": 0.0}
+
+
+def _update_stats(stats: MeetingStats, duration_hours: float) -> None:
+    """Add one meeting and its duration to the statistics accumulator."""
+    stats["total_meetings"] += 1
+    stats["total_hours"] += duration_hours
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the calendar analyzer CLI."""
+    parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
+    parser.add_argument("--calendar", help="Path to the exported calendar file (.ics)")
+    parser.add_argument("--start-date", help="Start date for analysis (YYYY-MM-DD)")
+    parser.add_argument("--end-date", help="End date for analysis (YYYY-MM-DD)")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_DAYS_BACK,
+        help=f"Number of days to look back from end date (default: {DEFAULT_DAYS_BACK})",
+    )
+    parser.add_argument("--titles", type=int, default=50, help="Number of meeting titles to display (default: 50)")
+    parser.add_argument("--output", help="Path to save the analysis summary (default: print to console)")
+    return parser.parse_args()
+
+
+def _parse_date_argument(value: str | None, label: str) -> datetime | None:
+    """Parse an optional YYYY-MM-DD CLI date into a Pacific-aware datetime."""
+    if value is None:
+        return None
+
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=PACIFIC)
+    except ValueError:
+        print(f"Error: {label} date must be in YYYY-MM-DD format")
+        raise_system_exit()
+
+
+def _validate_date_range(start_date: datetime | None, end_date: datetime | None) -> None:
+    """Exit with a user-facing error if the date range is inverted."""
+    if start_date is None or end_date is None or end_date >= start_date:
+        return
+
+    print("Error: End date cannot be before start date")
+    print(f"Start date: {start_date.strftime('%Y-%m-%d')}")
+    print(f"End date: {end_date.strftime('%Y-%m-%d')}")
+    raise_system_exit()
+
+
+def _write_or_print_summary(summary: str, output: str | None) -> None:
+    """Write the summary to a file or print it when no output path is supplied."""
+    if output is None:
         print("\n" + summary)
+        return
+
+    try:
+        _write_text_atomic(Path(output), summary)
+    except OSError as error:
+        print(f"Error saving to file: {error}")
+        raise_system_exit()
+
+    print(f"\nAnalysis saved to: {output}")
 
 
-if __name__ == "__main__":
+def _write_text_atomic(output_path: Path, content: str) -> None:
+    """Write text through a temporary file before replacing the destination."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=output_path.parent,
+            encoding="utf-8",
+            newline="\n",
+        ) as temp_file:
+            temp_file.write(content)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(output_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+if __name__ == "__main__":  # pragma: no cover
     main()

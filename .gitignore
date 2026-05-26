@@ -38,4 +38,7 @@ ENV/
 *.txt
 *.log
 analysis.txt
-.coverage 
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/

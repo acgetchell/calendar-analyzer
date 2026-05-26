@@ -1,22 +1,27 @@
 version: 2
 updates:
-  # Enable version updates for Python using pip
   - package-ecosystem: "pip"
-    # Look for pyproject.toml in the root directory
     directory: "/"
-    # Check for updates once a week
     schedule:
       interval: "weekly"
-    # Specify labels for pull requests for version updates
     labels:
       - "dependencies"
       - "python"
-    # Set version update strategy
     versioning-strategy: auto
-    # Allow up to 10 open pull requests for version updates
     open-pull-requests-limit: 10
-    # Group all updates together
     groups:
       dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions:
         patterns:
           - "*"
