@@ -1,6 +1,7 @@
 """Tests for calendar_analyzer module."""
 
 import os
+import sqlite3
 import tempfile
 import textwrap
 from datetime import UTC, datetime, timedelta
@@ -72,7 +73,7 @@ def test_analyze_mock_ics(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "calendar_analyzer.py",
+            "calendar-analyzer",
             "--calendar",
             tmp_path,
             "--start-date",
@@ -100,7 +101,7 @@ def test_invalid_start_date_format(monkeypatch, capsys) -> None:
     # Create a temporary dummy file path (secure alternative to mktemp)
     dummy_path = create_temp_dummy_file()
 
-    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", dummy_path, "--start-date", "invalid-date"])
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", dummy_path, "--start-date", "invalid-date"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -115,7 +116,7 @@ def test_invalid_end_date_format(monkeypatch, capsys) -> None:
     # Create a temporary dummy file path (secure alternative to mktemp)
     dummy_path = create_temp_dummy_file()
 
-    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", dummy_path, "--end-date", "2023/01/01"])
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", dummy_path, "--end-date", "2023/01/01"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -132,7 +133,7 @@ def test_end_date_before_start_date(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         "sys.argv",
-        ["calendar_analyzer.py", "--calendar", dummy_path, "--start-date", "2023-07-01", "--end-date", "2023-06-30"],
+        ["calendar-analyzer", "--calendar", dummy_path, "--start-date", "2023-07-01", "--end-date", "2023-06-30"],
     )
 
     with pytest.raises(SystemExit) as exc_info:
@@ -163,7 +164,7 @@ def test_valid_date_formats(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         "sys.argv",
-        ["calendar_analyzer.py", "--calendar", tmp_path, "--start-date", "2023-06-30", "--end-date", "2023-07-31"],
+        ["calendar-analyzer", "--calendar", tmp_path, "--start-date", "2023-06-30", "--end-date", "2023-07-31"],
     )
 
     # Should not raise SystemExit
@@ -184,7 +185,7 @@ def test_edge_case_dates(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "calendar_analyzer.py",
+            "calendar-analyzer",
             "--calendar",
             dummy_path,
             "--start-date",
@@ -203,7 +204,7 @@ def test_edge_case_dates(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "calendar_analyzer.py",
+            "calendar-analyzer",
             "--calendar",
             dummy_path2,
             "--start-date",
@@ -276,7 +277,7 @@ def test_file_output_functionality(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "calendar_analyzer.py",
+            "calendar-analyzer",
             "--calendar",
             tmp_ics_path,
             "--start-date",
@@ -322,7 +323,7 @@ def test_file_output_error(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
-            "calendar_analyzer.py",
+            "calendar-analyzer",
             "--calendar",
             tmp_path,
             "--start-date",
@@ -347,7 +348,7 @@ def test_file_output_error(monkeypatch, capsys) -> None:
 
 def test_calendar_file_read_error(monkeypatch, capsys) -> None:
     """Test error handling when calendar file cannot be read."""
-    monkeypatch.setattr("sys.argv", ["calendar_analyzer.py", "--calendar", "/nonexistent/file.ics"])
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", "/nonexistent/file.ics"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
@@ -404,7 +405,7 @@ def test_generate_summary_with_long_titles() -> None:
             "duration_hours": 1.0,
         },
         {
-            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            "date": datetime(2023, 7, 3, tzinfo=calendar_analyzer.PACIFIC).date(),
             "time": datetime(2023, 7, 1, 14, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
             "summary": "Short title",
             "duration_hours": 1.0,
@@ -419,6 +420,7 @@ def test_generate_summary_with_long_titles() -> None:
     assert "A" * 100 + "..." in result
     assert "Short title" in result
     assert "Total Meetings: 2" in result
+    assert "Average Meetings per Day: 1.0" in result
 
 
 def test_analyze_calendar_date_filtering() -> None:
@@ -707,6 +709,73 @@ def test_analyze_calendar_icbu_with_sqlite(capsys) -> None:
             assert f"Found SQLite database in ICBU backup: {sqlite_path}" in out
 
 
+def test_analyze_calendar_with_sqlite_file(capsys) -> None:
+    """Test direct SQLite calendar analysis through analyze_calendar."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
+        start_dt = datetime(2023, 7, 1, 17, 0, tzinfo=UTC)
+        end_dt = datetime(2023, 7, 1, 18, 30, tzinfo=UTC)
+        start_seconds = int((start_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+        end_seconds = int((end_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+
+        with sqlite3.connect(sqlite_path) as conn:
+            conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+            conn.execute(
+                "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
+                ("SQLite Meeting", start_seconds, end_seconds),
+            )
+
+        meetings, stats = calendar_analyzer.analyze_calendar(
+            sqlite_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+
+        assert stats == {"total_meetings": 1, "total_hours": 1.5}
+        assert meetings[0]["summary"] == "SQLite Meeting"
+        assert meetings[0]["time"].hour == 10
+        assert capsys.readouterr().out == ""
+
+
+def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:
+    """Test SQLite rows use the default title when summary is empty."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
+        start_dt = datetime(2023, 7, 1, 17, 0, tzinfo=UTC)
+        end_dt = datetime(2023, 7, 1, 18, 0, tzinfo=UTC)
+        start_seconds = int((start_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+        end_seconds = int((end_dt - calendar_analyzer.APPLE_EPOCH).total_seconds())
+
+        with sqlite3.connect(sqlite_path) as conn:
+            conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+            conn.execute(
+                "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
+                (None, start_seconds, end_seconds),
+            )
+
+        meetings, stats = calendar_analyzer.analyze_sqlite_calendar(
+            sqlite_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+
+        assert stats == {"total_meetings": 1, "total_hours": 1.0}
+        assert meetings[0]["summary"] == "No Title"
+
+
+def test_analyze_sqlite_calendar_read_error(capsys) -> None:
+    """Test SQLite analysis reports database read errors."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
+        sqlite_path.write_text("not a sqlite database")
+
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.analyze_sqlite_calendar(sqlite_path)
+
+        assert exc_info.value.code == 1
+        assert "Error reading SQLite calendar:" in capsys.readouterr().out
+
+
 def test_analyze_calendar_icbu_with_ics_fallback(capsys) -> None:
     """Test ICBU file handling with ICS fallback when no SQLite."""
     # Create ICS content
@@ -740,6 +809,48 @@ def test_analyze_calendar_icbu_with_ics_fallback(capsys) -> None:
 
         out = capsys.readouterr().out
         assert f"Found ICS file in ICBU backup: {ics_path}" in out
+
+
+def test_analyze_calendar_icbu_uses_sorted_ics_fallback(capsys) -> None:
+    """Test ICBU fallback chooses a deterministic ICS file."""
+    first_ics = textwrap.dedent("""
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    BEGIN:VEVENT
+    DTSTART:20230701T100000Z
+    DURATION:PT1H
+    SUMMARY:First ICS Meeting
+    END:VEVENT
+    END:VCALENDAR
+    """)
+    second_ics = textwrap.dedent("""
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    BEGIN:VEVENT
+    DTSTART:20230701T100000Z
+    DURATION:PT1H
+    SUMMARY:Second ICS Meeting
+    END:VEVENT
+    END:VCALENDAR
+    """)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        icbu_path = Path(tmp_dir) / "backup.icbu"
+        icbu_path.mkdir()
+        selected_ics_path = icbu_path / "a-calendar.ics"
+        selected_ics_path.write_text(first_ics)
+        (icbu_path / "z-calendar.ics").write_text(second_ics)
+
+        meetings, stats = calendar_analyzer.analyze_calendar(
+            icbu_path,
+            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+
+        assert stats["total_meetings"] == 1
+        assert meetings[0]["summary"] == "First ICS Meeting"
+        out = capsys.readouterr().out
+        assert f"Found ICS file in ICBU backup: {selected_ics_path}" in out
 
 
 def test_analyze_calendar_icbu_no_calendar_data(capsys) -> None:
@@ -905,3 +1016,81 @@ def test_analyze_calendar_duration_parsing_edge_cases() -> None:
 
     # Clean up
     Path(tmp_path).unlink()
+
+
+class CalendarProperty:
+    """Minimal calendar property wrapper for fake event values."""
+
+    def __init__(self, value: object) -> None:
+        """Store a value on the same attribute used by icalendar properties."""
+        self.dt = value
+
+
+class CalendarEvent:
+    """Minimal event object that supports the calendar analyzer event API."""
+
+    def __init__(self, start: datetime, summary: str, duration: object) -> None:
+        """Create a fake event with start, summary, and duration fields."""
+        self.values = {
+            "dtstart": CalendarProperty(start),
+            "duration": duration,
+            "summary": summary,
+        }
+
+    def get(self, key: str, default: object = None) -> object:
+        """Return the requested fake event field."""
+        return self.values.get(key, default)
+
+
+class CalendarDuration:
+    """Minimal duration object whose string representation matches ICS syntax."""
+
+    def __init__(self, value: str) -> None:
+        """Store the duration text."""
+        self.value = value
+
+    def __str__(self) -> str:
+        """Return the ICS-style duration text."""
+        return self.value
+
+
+class CalendarWithEvents:
+    """Minimal calendar object that returns fake VEVENT entries."""
+
+    def __init__(self, events: list[CalendarEvent]) -> None:
+        """Store fake events for later traversal."""
+        self.events = events
+
+    def walk(self, component: str) -> list[CalendarEvent]:
+        """Return fake VEVENT entries."""
+        assert component == "VEVENT"
+        return self.events
+
+
+def test_analyze_calendar_duration_timedelta_and_string_branches(monkeypatch) -> None:
+    """Test public calendar analysis for timedelta and string duration inputs."""
+    start = datetime(2023, 7, 1, 17, 0, tzinfo=UTC)
+    calendar = CalendarWithEvents(
+        [
+            CalendarEvent(start, "Timedelta Duration", timedelta(hours=2)),
+            CalendarEvent(start, "String Hour Duration", CalendarDuration("PT3H")),
+            CalendarEvent(start, "Fallback String Duration", CalendarDuration("PT30M")),
+            CalendarEvent(start, "Malformed Hour Duration", CalendarDuration("PTXH")),
+        ]
+    )
+    monkeypatch.setattr("calendar_analyzer._read_ics_calendar", lambda _: calendar)
+
+    meetings, stats = calendar_analyzer.analyze_calendar(
+        Path("fake.ics"),
+        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    )
+
+    durations_by_title = {meeting["summary"]: meeting["duration_hours"] for meeting in meetings}
+    assert durations_by_title == {
+        "Timedelta Duration": 2.0,
+        "String Hour Duration": 3.0,
+        "Fallback String Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
+        "Malformed Hour Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
+    }
+    assert stats == {"total_meetings": 4, "total_hours": 7.0}

@@ -75,7 +75,14 @@ ensure_uv() {
 	fi
 
 	echo "  installing uv with the official installer"
-	curl -LsSf https://astral.sh/uv/install.sh | sh
+	local uv_installer
+	uv_installer="$(mktemp "${TMPDIR:-/tmp}/uv-install.XXXXXX")"
+	curl -LsSf https://astral.sh/uv/install.sh -o "$uv_installer"
+	if ! sh "$uv_installer"; then
+		rm -f "$uv_installer"
+		return 1
+	fi
+	rm -f "$uv_installer"
 	export PATH="$HOME/.local/bin:$PATH"
 }
 

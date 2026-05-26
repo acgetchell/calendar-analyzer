@@ -71,7 +71,7 @@ def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
         print_calendar_export_instructions()
         raise_system_exit()
 
-    latest_calendar = max(calendar_files, key=lambda path: path.stat().st_mtime)
+    latest_calendar = max(calendar_files, key=lambda path: (path.stat().st_mtime, path.as_posix()))
     print(f"\nSelected most recent calendar file: {latest_calendar}")
     return latest_calendar
 
@@ -128,16 +128,15 @@ def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: i
         return "No meetings found in the specified time period."
 
     df = pd.DataFrame(meetings)
-    avg_meetings_per_day = stats["total_meetings"] / DEFAULT_DAYS_BACK
+    start_date = df["date"].min()
+    end_date = df["date"].max()
+    date_range_days = max((end_date - start_date).days, 1)
+    avg_meetings_per_day = stats["total_meetings"] / date_range_days
     avg_meeting_duration = stats["total_hours"] / stats["total_meetings"]
 
     now = datetime.now(PACIFIC)
     is_dst = now.dst() != timedelta(0)
     timezone_name = "PDT" if is_dst else "PST"
-
-    start_date = df["date"].min()
-    end_date = df["date"].max()
-    date_range_days = (end_date - start_date).days
 
     summary = [
         f"📅 Calendar Analysis Summary (All times in Pacific Time - Currently {timezone_name})",
@@ -239,7 +238,7 @@ def _calendar_files_in_directory(path: Path) -> list[Path]:
 
     calendar_files: list[Path] = []
     for pattern in CALENDAR_PATTERNS:
-        calendar_files.extend(path.rglob(pattern))
+        calendar_files.extend(sorted(path.rglob(pattern)))
     return calendar_files
 
 
@@ -265,7 +264,7 @@ def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
     if calendar_path.suffix.lower() != ".icbu":
         return calendar_path
 
-    if ics_files := list(calendar_path.glob("*.ics")):
+    if ics_files := sorted(calendar_path.glob("*.ics")):
         ics_path = ics_files[0]
         print(f"Found ICS file in ICBU backup: {ics_path}")
         return ics_path
@@ -344,7 +343,10 @@ def _event_duration_hours(event: Any, start: datetime) -> float:
 
 def _duration_string_hours(duration: str) -> float:
     if duration.startswith("PT") and duration.endswith("H"):
-        return float(duration[2:-1])
+        try:
+            return float(duration[2:-1])
+        except ValueError:
+            return DEFAULT_DURATION_HOURS
     return DEFAULT_DURATION_HOURS
 
 
