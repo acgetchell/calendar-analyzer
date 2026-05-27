@@ -48,7 +48,7 @@ rules:
         - "/.github/workflows/**/*.yml"
         - "/.github/workflows/**/*.yaml"
     patterns:
-      - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)(?!(?:actions/checkout|actions/setup-python|astral-sh/setup-uv|taiki-e/install-action|github/codeql-action/(?:init|analyze)|codecov/codecov-action)@)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@'
+      - pattern-regex: '(?m)^\s*(?:-\s*)?uses:\s*(?!\./)(?!docker://)(?!(?:actions/checkout|actions/setup-python|astral-sh/setup-uv|taiki-e/install-action|github/codeql-action/(?:init|analyze)|codecov/codecov-action|zizmorcore/zizmor-action)@)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?@'
 
   - id: calendar-analyzer.github-actions.external-action-version-comment
     languages:

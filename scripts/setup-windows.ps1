@@ -147,6 +147,7 @@ Install-WingetTool -CommandName "shfmt" -WingetId "mvdan.shfmt" -DisplayName "sh
 Install-CargoTool -CommandName "just" -CrateName "just"
 Install-CargoTool -CommandName "taplo" -CrateName "taplo-cli"
 Install-CargoTool -CommandName "typos" -CrateName "typos-cli"
+Install-CargoTool -CommandName "zizmor" -CrateName "zizmor"
 Install-PSScriptAnalyzer
 
 Write-Information "Ensuring Python 3.11 is available through uv..."

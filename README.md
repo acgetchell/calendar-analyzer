@@ -126,10 +126,10 @@ just fix
 # Run the analyzer
 just run --days 90
 
-# Run pip-audit and repository Semgrep rules
+# Run pip-audit, repository Semgrep rules, and zizmor
 just security
 
-# Sync development dependencies
+# Install or verify development tools and sync dependencies
 just setup
 
 # Run tests only
