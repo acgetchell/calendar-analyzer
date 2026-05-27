@@ -113,6 +113,23 @@ rules:
       with sqlite3.connect(...) as $CONN:
           ...
 
+  - id: calendar-analyzer.python.no-raw-calendar-record-debug-print
+    languages:
+      - python
+    severity: ERROR
+    message: "Do not debug-print raw calendar records or title fields; route intentional user-facing output through generate_summary(...)."
+    metadata:
+      category: security
+      cwe:
+        - "CWE-532: Insertion of Sensitive Information into Log File"
+      rationale: "Raw calendar records can contain private meeting titles, attendees, locations, and notes."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+    patterns:
+      - pattern-regex: >-
+          ^\s*print\(\s*(?:meeting|meetings|row|rows|appointment|appointments)(?:\s*\[\s*["'](?:summary|Subject)["']\s*\])?\s*\)
+
   - id: calendar-analyzer.python.no-broad-exception
     languages:
       - python

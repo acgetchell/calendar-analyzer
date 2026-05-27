@@ -89,6 +89,15 @@ just run --calendar /path/to/your/calendar.olm
 # Show top 10 meeting titles
 just run --titles 10
 
+# Show top 8 common meeting times
+just run --times 8
+
+# Exclude meeting titles by case-insensitive regex
+just run --exclude-title 'SVM|VMTH'
+
+# Repeat exclusions for separate title patterns
+just run --exclude-title 'SVM' --exclude-title 'VMTH|State of the Hospital'
+
 # Save results to file
 just run --output analysis.txt
 ```

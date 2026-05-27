@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sqlite3
 import sys
 import tempfile
 import zipfile
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
@@ -27,6 +29,7 @@ APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb", "*.olm")
 DEFAULT_DAYS_BACK = 365
 DEFAULT_DURATION_HOURS = 1.0
+MAX_TIMED_MEETING_HOURS = 8.0
 OUTLOOK_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y")
 OUTLOOK_TIME_FORMATS = ("%I:%M %p", "%I:%M:%S %p", "%H:%M", "%H:%M:%S")
 OUTLOOK_DATETIME_FORMATS = (
@@ -52,7 +55,18 @@ class MeetingStats(TypedDict):
     total_hours: float
 
 
+@dataclass(frozen=True)
+class SummaryOptions:
+    """Display options for the generated calendar summary."""
+
+    num_titles: int = 50
+    num_times: int = 5
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+
+
 CalendarAnalysis = tuple[list[Meeting], MeetingStats]
+SqliteCalendarRow = tuple[str | None, int, int, Any]
 
 
 def convert_to_pacific(dt: datetime) -> datetime:
@@ -184,14 +198,19 @@ def analyze_olm_calendar(
         raise_system_exit()
 
 
-def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: int = 50) -> str:
+def generate_summary(
+    meetings: list[Meeting],
+    stats: MeetingStats,
+    options: SummaryOptions | None = None,
+) -> str:
     """Generate a summary of the calendar analysis."""
     if not meetings:
         return "No meetings found in the specified time period."
 
+    options = options or SummaryOptions()
     df = pd.DataFrame(meetings)
-    start_date = df["date"].min()
-    end_date = df["date"].max()
+    start_date = options.period_start.date() if options.period_start is not None else df["date"].min()
+    end_date = options.period_end.date() if options.period_end is not None else df["date"].max()
     date_range_days = max((end_date - start_date).days, 1)
     avg_meetings_per_day = stats["total_meetings"] / date_range_days
     avg_meeting_duration = stats["total_hours"] / stats["total_meetings"]
@@ -217,16 +236,16 @@ def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: i
         f"- Total Meeting Hours: {stats['total_hours']:.1f}",
         f"- Average Meetings per Day: {avg_meetings_per_day:.1f}",
         f"- Average Meeting Duration: {avg_meeting_duration:.1f} hours",
-        f"\nTop 5 Most Common Meeting Times ({timezone_name}):",
+        f"\nTop {options.num_times} Most Common Meeting Times ({timezone_name}):",
     ]
 
-    time_counts = df["time"].value_counts().head()
+    time_counts = df["time"].value_counts().head(options.num_times)
     summary.extend(
         f"- {meeting_time.strftime('%I:%M %p')}: {count} meetings" for meeting_time, count in time_counts.items()
     )
-    summary.extend([f"\nTop {num_titles} Most Frequent Meeting Titles:", "-" * 30])
+    summary.extend([f"\nTop {options.num_titles} Most Frequent Meeting Titles:", "-" * 30])
 
-    title_counts = df["summary"].value_counts().head(num_titles)
+    title_counts = df["summary"].value_counts().head(options.num_titles)
     for title, count in title_counts.items():
         display_title = f"{title[:100]}..." if len(title) > 100 else title
         summary.append(f"{count:4d} | {display_title}")
@@ -237,16 +256,28 @@ def generate_summary(meetings: list[Meeting], stats: MeetingStats, num_titles: i
 def main() -> None:
     """Run the calendar analyzer command-line interface."""
     args = _parse_args()
-    start_date = _parse_date_argument(args.start_date, "Start")
-    end_date = _parse_date_argument(args.end_date, "End")
-    _validate_date_range(start_date, end_date)
+    requested_start_date = _parse_date_argument(args.start_date, "Start")
+    requested_end_date = _parse_date_argument(args.end_date, "End")
+    _validate_date_range(requested_start_date, requested_end_date)
+    excluded_title_patterns = _compile_title_exclusion_patterns(args.exclude_titles)
+    start_date, end_date = _resolve_date_range(requested_start_date, requested_end_date, args.days)
 
     print("📊 Analyzing your calendar...")
     calendar_path = get_calendar_path(args.calendar)
     print(f"Found calendar at: {calendar_path}")
 
     meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
-    summary = generate_summary(meetings, stats, args.titles)
+    meetings, stats = _exclude_title_matches(meetings, excluded_title_patterns)
+    summary = generate_summary(
+        meetings,
+        stats,
+        SummaryOptions(
+            num_titles=args.titles,
+            num_times=args.times,
+            period_start=start_date,
+            period_end=end_date,
+        ),
+    )
     _write_or_print_summary(summary, args.output)
 
 
@@ -375,15 +406,21 @@ def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: date
     stats = _empty_stats()
 
     for event in calendar.walk("VEVENT"):
-        start = _event_start_datetime(event)
-        if start is None:
+        if _event_is_transparent(event):
             continue
 
-        start = convert_to_pacific(start)
+        raw_start = _event_start_datetime(event)
+        if raw_start is None:
+            continue
+
+        start = convert_to_pacific(raw_start)
         if not start_date <= start <= end_date:
             continue
 
         duration_hours = _event_duration_hours(event, start)
+        if _is_all_day_like_calendar_block(start, duration_hours) or _is_floating_midnight(raw_start):
+            continue
+
         meeting = _meeting_from_event(event, start, duration_hours)
         meetings.append(meeting)
         _update_stats(stats, duration_hours)
@@ -397,6 +434,12 @@ def _event_start_datetime(event: Any) -> datetime | None:
     if start is None or not isinstance(start.dt, datetime):
         return None
     return start.dt
+
+
+def _event_is_transparent(event: Any) -> bool:
+    """Return whether a VEVENT is marked free/transparent."""
+    transparency = event.get("transp")
+    return str(transparency or "").strip().upper() == "TRANSPARENT"
 
 
 def _event_duration_hours(event: Any, start: datetime) -> float:
@@ -449,33 +492,56 @@ def _fetch_sqlite_calendar_rows(
     calendar_path: Path,
     start_seconds: int,
     end_seconds: int,
-) -> list[tuple[str | None, int, int]]:
+) -> list[SqliteCalendarRow]:
     """Fetch SQLite calendar rows in the Apple-epoch date range."""
     with closing(sqlite3.connect(calendar_path)) as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
+        all_day_column = _sqlite_all_day_column(cursor)
+        all_day_expression = _quote_sqlite_identifier(all_day_column) if all_day_column is not None else "0"
+        # The only interpolated SQL is a column name returned by PRAGMA table_info.
+        query = f"""
             SELECT
                 summary,
                 start_date,
-                end_date
+                end_date,
+                {all_day_expression}
             FROM CalendarItem
             WHERE start_date >= ? AND start_date <= ?
-            """,
-            (start_seconds, end_seconds),
-        )
+            """  # noqa: S608
+        cursor.execute(query, (start_seconds, end_seconds))
         return cursor.fetchall()
 
 
-def _analyze_sqlite_rows(rows: Iterable[tuple[str | None, int, int]]) -> CalendarAnalysis:
+def _sqlite_all_day_column(cursor: sqlite3.Cursor) -> str | None:
+    """Return the CalendarItem all-day column name when the schema has one."""
+    cursor.execute("PRAGMA table_info(CalendarItem)")
+    for column in cursor.fetchall():
+        column_name = str(column[1])
+        if _normalize_csv_field(column_name) in {"allday", "isallday"}:
+            return column_name
+    return None
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier that came from SQLite schema introspection."""
+    return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+
+def _analyze_sqlite_rows(rows: Iterable[SqliteCalendarRow]) -> CalendarAnalysis:
     """Normalize SQLite calendar rows and aggregate meeting stats."""
     meetings: list[Meeting] = []
     stats = _empty_stats()
 
-    for summary, start_seconds, end_seconds in rows:
+    for summary, start_seconds, end_seconds, is_all_day in rows:
+        if _csv_truthy(str(is_all_day)):
+            continue
+
         start_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=start_seconds))
         end_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=end_seconds))
-        duration_hours = (end_dt - start_dt).total_seconds() / 3600
+        duration_hours = _positive_duration_hours(start_dt, end_dt)
+        if _is_all_day_like_calendar_block(start_dt, duration_hours):
+            continue
+
         meetings.append(
             {
                 "date": start_dt.date(),
@@ -529,7 +595,7 @@ def _analyze_olm_appointments(
     unparsable_start_values: list[str] = []
 
     for appointment in appointments:
-        if _xml_truthy(_xml_text(appointment, ("OPFCalendarEventCopyIsAllDayEvent", "AllDayEvent"))):
+        if _olm_appointment_is_all_day(appointment) or _olm_appointment_is_free(appointment):
             continue
 
         start_value = _olm_appointment_start_text(appointment)
@@ -548,6 +614,9 @@ def _analyze_olm_appointments(
 
         end = _olm_appointment_end(appointment, start)
         duration_hours = _positive_duration_hours(start, end)
+        if _is_all_day_like_calendar_block(start, duration_hours):
+            continue
+
         meetings.append(
             {
                 "date": start.date(),
@@ -568,7 +637,12 @@ def _analyze_olm_appointments(
 
 def _olm_appointment_start(appointment: Element) -> datetime | None:
     """Return the start datetime from an OLM appointment."""
-    return _outlook_datetime(_olm_appointment_start_text(appointment))
+    start = _outlook_datetime(_olm_appointment_start_text(appointment), require_time=True)
+    return start or _outlook_xml_split_datetime(
+        appointment,
+        ("OPFCalendarEventCopyStartDate", "StartDate"),
+        ("OPFCalendarEventCopyStartTime", "StartTime"),
+    )
 
 
 def _olm_appointment_start_text(appointment: Element) -> str | None:
@@ -577,27 +651,54 @@ def _olm_appointment_start_text(appointment: Element) -> str | None:
         appointment,
         (
             "OPFCalendarEventCopyStartTime",
-            "OPFCalendarEventCopyStartDate",
             "StartTime",
-            "StartDate",
         ),
     )
 
 
-def _olm_appointment_end(appointment: Element, start: datetime) -> datetime:
-    """Return the end datetime from an OLM appointment."""
-    end = _outlook_datetime(
+def _olm_appointment_is_all_day(appointment: Element) -> bool:
+    """Return whether an OLM appointment is explicitly or implicitly all-day."""
+    if _xml_truthy(
         _xml_text(
             appointment,
             (
-                "OPFCalendarEventCopyEndTime",
-                "OPFCalendarEventCopyEndDate",
-                "EndTime",
-                "EndDate",
+                "OPFCalendarEventGetIsAllDayEvent",
+                "OPFCalendarEventCopyIsAllDayEvent",
+                "OPFCalendarEventCopyAllDayEvent",
+                "AllDayEvent",
+                "AllDay",
             ),
         )
+    ):
+        return True
+
+    return _olm_appointment_start_text(appointment) is None and _olm_appointment_date_text(appointment) is not None
+
+
+def _olm_appointment_is_free(appointment: Element) -> bool:
+    """Return whether an OLM appointment is marked free on the calendar."""
+    return _is_free_busy_free(_xml_text(appointment, ("OPFCalendarEventCopyFreeBusyStatus", "FreeBusyStatus")))
+
+
+def _olm_appointment_date_text(appointment: Element) -> str | None:
+    """Return the raw OLM appointment date-only value."""
+    return _xml_text(appointment, ("OPFCalendarEventCopyStartDate", "StartDate"))
+
+
+def _olm_appointment_end(appointment: Element, start: datetime) -> datetime:
+    """Return the end datetime from an OLM appointment."""
+    end = _outlook_datetime(_olm_appointment_end_text(appointment)) or _outlook_xml_split_datetime(
+        appointment,
+        ("OPFCalendarEventCopyEndDate", "EndDate"),
+        ("OPFCalendarEventCopyEndTime", "EndTime"),
+        fallback_date=start,
     )
     return end or start + timedelta(hours=DEFAULT_DURATION_HOURS)
+
+
+def _olm_appointment_end_text(appointment: Element) -> str | None:
+    """Return the raw OLM appointment end value."""
+    return _xml_text(appointment, ("OPFCalendarEventCopyEndTime", "EndTime"))
 
 
 def _xml_text(element: Element, field_names: tuple[str, ...]) -> str | None:
@@ -669,6 +770,9 @@ def _analyze_outlook_csv_rows(
 
         end = _outlook_csv_end_datetime(row, start)
         duration_hours = _positive_duration_hours(start, end)
+        if _is_all_day_like_calendar_block(start, duration_hours):
+            continue
+
         meetings.append(
             {
                 "date": start.date(),
@@ -686,9 +790,12 @@ def _outlook_csv_start_datetime(row: dict[str, str]) -> datetime | None:
     """Return the row start datetime, skipping all-day rows."""
     if _csv_truthy(_csv_value(row, ("All day event", "All Day Event", "All Day", "AllDayEvent"))):
         return None
+    if _is_free_busy_free(_csv_value(row, ("Show Time As", "Show As", "Busy Status", "FreeBusyStatus"))):
+        return None
 
     return _outlook_split_datetime(row, ("Start Date", "StartDate"), ("Start Time", "StartTime")) or _outlook_datetime(
-        _csv_value(row, ("Start", "Starts", "Start Date Time", "StartDateTime"))
+        _csv_value(row, ("Start", "Starts", "Start Date Time", "StartDateTime")),
+        require_time=True,
     )
 
 
@@ -711,16 +818,45 @@ def _outlook_split_datetime(
     fallback_date: datetime | None = None,
 ) -> datetime | None:
     """Parse Outlook date and time columns into a Pacific-aware datetime."""
-    date_value = _csv_value(row, date_aliases)
-    time_value = _csv_value(row, time_aliases)
+    return _outlook_datetime_from_parts(_csv_value(row, date_aliases), _csv_value(row, time_aliases), fallback_date)
+
+
+def _outlook_xml_split_datetime(
+    element: Element,
+    date_aliases: tuple[str, ...],
+    time_aliases: tuple[str, ...],
+    fallback_date: datetime | None = None,
+) -> datetime | None:
+    """Parse Outlook XML date and time fields into a Pacific-aware datetime."""
+    return _outlook_datetime_from_parts(
+        _xml_text(element, date_aliases),
+        _xml_text(element, time_aliases),
+        fallback_date,
+    )
+
+
+def _outlook_datetime_from_parts(
+    date_value: str | None,
+    time_value: str | None,
+    fallback_date: datetime | None = None,
+) -> datetime | None:
+    """Parse date and time parts, treating missing start times as all-day."""
     if not date_value and fallback_date is None:
         return None
+    if not time_value and fallback_date is None:
+        return None
+    has_explicit_time = bool(time_value)
     if not date_value:
         date_value = _fallback_date_text(fallback_date)
     if not time_value:
         time_value = "12:00 AM"
 
-    return _outlook_datetime(f"{date_value} {time_value}") or _outlook_datetime(date_value)
+    parsed = _outlook_datetime(f"{date_value} {time_value}")
+    if parsed is not None:
+        return parsed
+    if has_explicit_time:
+        return None
+    return _outlook_datetime(date_value)
 
 
 def _fallback_date_text(fallback_date: datetime | None) -> str:
@@ -731,24 +867,38 @@ def _fallback_date_text(fallback_date: datetime | None) -> str:
     return fallback_date.strftime("%Y-%m-%d")
 
 
-def _outlook_datetime(value: str | None) -> datetime | None:
+def _outlook_datetime(value: str | None, *, require_time: bool = False) -> datetime | None:
     """Parse a date/time value from an Outlook CSV export."""
     if value is None or not value.strip():
         return None
 
     text = value.strip()
-    for date_format in OUTLOOK_DATETIME_FORMATS:
+    parsed = _parse_outlook_strptime(text, OUTLOOK_DATETIME_FORMATS)
+    if parsed is not None:
+        return parsed
+
+    if not require_time:
+        parsed = _parse_outlook_strptime(text, OUTLOOK_DATE_FORMATS)
+        if parsed is not None:
+            return parsed
+    elif not _outlook_text_has_time(text):
+        return None
+
+    return _parse_outlook_iso_datetime(text)
+
+
+def _parse_outlook_strptime(text: str, date_formats: tuple[str, ...]) -> datetime | None:
+    """Parse an Outlook date/time string using known strptime formats."""
+    for date_format in date_formats:
         try:
             return datetime.strptime(text, date_format).replace(tzinfo=PACIFIC)
         except ValueError:
             continue
+    return None
 
-    for date_format in OUTLOOK_DATE_FORMATS:
-        try:
-            return datetime.strptime(text, date_format).replace(tzinfo=PACIFIC)
-        except ValueError:
-            continue
 
+def _parse_outlook_iso_datetime(text: str) -> datetime | None:
+    """Parse an ISO datetime while preserving or assigning Pacific time."""
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -758,12 +908,33 @@ def _outlook_datetime(value: str | None) -> datetime | None:
     return convert_to_pacific(parsed)
 
 
+def _outlook_text_has_time(text: str) -> bool:
+    """Return whether an Outlook date/time string appears to include a time."""
+    return ":" in text or "T" in text
+
+
 def _positive_duration_hours(start: datetime, end: datetime) -> float:
     """Return a positive duration, falling back when end precedes start."""
     duration_hours = (end - start).total_seconds() / 3600
     if duration_hours <= 0:
         return DEFAULT_DURATION_HOURS
     return duration_hours
+
+
+def _is_all_day_like_calendar_block(start: datetime, duration_hours: float) -> bool:
+    """Return whether a timed export row looks like an all-day/non-meeting block."""
+    starts_at_midnight = _starts_at_midnight(start)
+    return starts_at_midnight or duration_hours >= MAX_TIMED_MEETING_HOURS
+
+
+def _is_floating_midnight(start: datetime) -> bool:
+    """Return whether an ICS floating local start time is midnight."""
+    return start.tzinfo is None and _starts_at_midnight(start)
+
+
+def _starts_at_midnight(start: datetime) -> bool:
+    """Return whether a datetime starts exactly at midnight."""
+    return start.timetz().replace(tzinfo=None) == time()
 
 
 def _csv_value(row: dict[str, str], aliases: tuple[str, ...]) -> str | None:
@@ -792,9 +963,50 @@ def _csv_truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _is_free_busy_free(value: str | None) -> bool:
+    """Return whether a free/busy value marks the item as free time."""
+    return value is not None and value.strip().lower() in {"0", "free", "transparent"}
+
+
 def _empty_stats() -> MeetingStats:
     """Create an empty meeting statistics accumulator."""
     return {"total_meetings": 0, "total_hours": 0.0}
+
+
+def _compile_title_exclusion_patterns(patterns: list[str] | None) -> list[re.Pattern[str]]:
+    """Compile case-insensitive title exclusion regexes."""
+    compiled_patterns: list[re.Pattern[str]] = []
+    for pattern in patterns or []:
+        try:
+            compiled_patterns.append(re.compile(pattern, re.IGNORECASE))
+        except re.error as error:
+            print(f"Error: Invalid --exclude-title regex {pattern!r}: {error}")
+            raise_system_exit()
+    return compiled_patterns
+
+
+def _exclude_title_matches(
+    meetings: list[Meeting],
+    excluded_title_patterns: list[re.Pattern[str]],
+) -> CalendarAnalysis:
+    """Remove meetings whose titles match any excluded title regex."""
+    if not excluded_title_patterns:
+        return meetings, _stats_from_meetings(meetings)
+
+    filtered_meetings = [
+        meeting
+        for meeting in meetings
+        if not any(pattern.search(meeting["summary"]) for pattern in excluded_title_patterns)
+    ]
+    return filtered_meetings, _stats_from_meetings(filtered_meetings)
+
+
+def _stats_from_meetings(meetings: list[Meeting]) -> MeetingStats:
+    """Build aggregate statistics from normalized meetings."""
+    return {
+        "total_meetings": len(meetings),
+        "total_hours": sum(meeting["duration_hours"] for meeting in meetings),
+    }
 
 
 def _update_stats(stats: MeetingStats, duration_hours: float) -> None:
@@ -815,7 +1027,14 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_DAYS_BACK,
         help=f"Number of days to look back from end date (default: {DEFAULT_DAYS_BACK})",
     )
+    parser.add_argument("--times", type=int, default=5, help="Number of meeting times to display (default: 5)")
     parser.add_argument("--titles", type=int, default=50, help="Number of meeting titles to display (default: 50)")
+    parser.add_argument(
+        "--exclude-title",
+        action="append",
+        dest="exclude_titles",
+        help="Case-insensitive regex for meeting titles to exclude from statistics; may be repeated",
+    )
     parser.add_argument("--output", help="Path to save the analysis summary (default: print to console)")
     return parser.parse_args()
 
@@ -846,6 +1065,8 @@ def _validate_date_range(start_date: datetime | None, end_date: datetime | None)
 def _write_or_print_summary(summary: str, output: str | None) -> None:
     """Write the summary to a file or print it when no output path is supplied."""
     if output is None:
+        # The CLI intentionally prints the requested meeting-title report by default.
+        # codeql[py/clear-text-logging-sensitive-data]  # noqa: ERA001
         print("\n" + summary)
         return
 
