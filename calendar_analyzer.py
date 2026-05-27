@@ -1075,6 +1075,10 @@ def _parse_date_argument(value: str | None, label: str, *, end_of_day: bool = Fa
     if value is None:
         return None
 
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+        print(f"Error: {label} date must be in YYYY-MM-DD format")
+        raise_system_exit()
+
     try:
         parsed_date = date.fromisoformat(value)
     except ValueError:
@@ -1120,8 +1124,7 @@ def _write_summary_to_stdout(summary: str) -> None:
         stdout_buffer.flush()
         return
 
-    write_text = sys.stdout.write
-    write_text(summary_text)
+    sys.stdout.writelines([summary_text])
     sys.stdout.flush()
 
 

@@ -259,6 +259,21 @@ def test_invalid_end_date_format(monkeypatch, capsys) -> None:
     assert "Error: End date must be in YYYY-MM-DD format" in out
 
 
+@pytest.mark.parametrize("start_date", ["20230701", "2023-W26-6"])
+def test_start_date_rejects_non_extended_iso_formats(monkeypatch, capsys, start_date: str) -> None:
+    """Test start dates must use the documented YYYY-MM-DD spelling."""
+    dummy_path = create_temp_dummy_file()
+
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", dummy_path, "--start-date", start_date])
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    assert "Error: Start date must be in YYYY-MM-DD format" in capsys.readouterr().out
+    Path(dummy_path).unlink()
+
+
 @pytest.mark.parametrize(("option", "value"), [("--days", "0"), ("--times", "-1"), ("--titles", "0")])
 def test_positive_integer_arguments_reject_non_positive_values(monkeypatch, capsys, option: str, value: str) -> None:
     """Test count and range arguments must be positive integers."""
