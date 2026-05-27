@@ -370,7 +370,7 @@ def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
 
     print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
     _print_directory_contents(calendar_path, "Contents of ICBU directory:")
-    raise_system_exit()
+    return raise_system_exit()
 
 
 def _print_directory_contents(directory: Path, heading: str) -> None:
@@ -1066,7 +1066,7 @@ def _write_or_print_summary(summary: str, output: str | None) -> None:
     """Write the summary to a file or print it when no output path is supplied."""
     if output is None:
         # The CLI intentionally prints the requested meeting-title report by default.
-        # codeql[py/clear-text-logging-sensitive-data]  # noqa: ERA001
+        # lgtm[py/clear-text-logging-sensitive-data]  # noqa: ERA001
         print("\n" + summary)
         return
 
