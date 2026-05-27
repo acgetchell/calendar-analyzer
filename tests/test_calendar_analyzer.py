@@ -1,5 +1,6 @@
 """Tests for calendar_analyzer module."""
 
+import io
 import os
 import sqlite3
 import tempfile
@@ -14,6 +15,50 @@ from unittest.mock import patch
 import pytest
 
 import calendar_analyzer
+
+
+class BufferedTextStdout:
+    """Text stream test double with a binary buffer below it."""
+
+    def __init__(self) -> None:
+        """Create empty pending and flushed output buffers."""
+        self.buffer = BinaryStdoutBuffer(self)
+        self._pending: list[str] = []
+        self._flushed: list[str] = []
+
+    def write(self, text: str) -> int:
+        """Buffer text writes until flush is called."""
+        self._pending.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        """Move pending text writes into observable output."""
+        self._flushed.extend(self._pending)
+        self._pending.clear()
+
+    def write_bytes(self, content: bytes) -> int:
+        """Write decoded bytes directly to observable output."""
+        self._flushed.append(content.decode())
+        return len(content)
+
+    def getvalue(self) -> str:
+        """Return flushed and pending text output."""
+        return "".join([*self._flushed, *self._pending])
+
+
+class BinaryStdoutBuffer:
+    """Binary stream test double attached to BufferedTextStdout."""
+
+    def __init__(self, stdout: BufferedTextStdout) -> None:
+        """Store the parent text stream."""
+        self._stdout = stdout
+
+    def write(self, content: bytes) -> int:
+        """Write decoded bytes directly to observable output."""
+        return self._stdout.write_bytes(content)
+
+    def flush(self) -> None:
+        """Flush the binary stream."""
 
 
 def create_temp_ics_file(content: str, suffix: str = ".ics") -> str:
@@ -214,6 +259,18 @@ def test_invalid_end_date_format(monkeypatch, capsys) -> None:
     assert "Error: End date must be in YYYY-MM-DD format" in out
 
 
+@pytest.mark.parametrize(("option", "value"), [("--days", "0"), ("--times", "-1"), ("--titles", "0")])
+def test_positive_integer_arguments_reject_non_positive_values(monkeypatch, capsys, option: str, value: str) -> None:
+    """Test count and range arguments must be positive integers."""
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", option, value])
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 2
+    assert f"argument {option}: must be a positive integer" in capsys.readouterr().err
+
+
 def test_end_date_before_start_date(monkeypatch, capsys) -> None:
     """Test that end date before start date causes system exit."""
     # Create a temporary dummy file path (secure alternative to mktemp)
@@ -260,6 +317,40 @@ def test_valid_date_formats(monkeypatch, capsys) -> None:
 
     out = capsys.readouterr().out
     assert "Test Meeting" in out
+
+
+def test_cli_end_date_includes_entire_calendar_day(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test --end-date includes meetings later on that date."""
+    calendar_path = tmp_path / "calendar.ics"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20240731T190000Z
+        DURATION:PT1H
+        SUMMARY:End Date Noon Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--start-date",
+            "2024-07-01",
+            "--end-date",
+            "2024-07-31",
+        ],
+    )
+
+    calendar_analyzer.main()
+
+    assert "End Date Noon Meeting" in capsys.readouterr().out
 
 
 def test_edge_case_dates(monkeypatch, capsys) -> None:
@@ -482,6 +573,80 @@ def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
     output_path.unlink()
 
 
+def test_main_supports_text_only_stdout(monkeypatch) -> None:
+    """Test summary output works when stdout has no binary buffer."""
+    ics_content = textwrap.dedent("""
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    BEGIN:VEVENT
+    DTSTART:20230701T100000Z
+    DURATION:PT1H
+    SUMMARY:Test Meeting
+    END:VEVENT
+    END:VCALENDAR
+    """)
+    tmp_ics_path = create_temp_ics_file(ics_content)
+    stdout = io.StringIO()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            tmp_ics_path,
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+    monkeypatch.setattr(calendar_analyzer.sys, "stdout", stdout)
+
+    calendar_analyzer.main()
+
+    out = stdout.getvalue()
+    assert "Calendar Analysis Summary" in out
+    assert "Test Meeting" in out
+    Path(tmp_ics_path).unlink()
+
+
+def test_main_flushes_status_output_before_binary_summary(monkeypatch, tmp_path: Path) -> None:
+    """Test binary summary writes preserve earlier text output order."""
+    calendar_path = tmp_path / "calendar.ics"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T100000Z
+        DURATION:PT1H
+        SUMMARY:Ordered Output Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    stdout = BufferedTextStdout()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+    monkeypatch.setattr(calendar_analyzer.sys, "stdout", stdout)
+
+    calendar_analyzer.main()
+
+    out = stdout.getvalue()
+    assert out.index("📊 Analyzing your calendar...") < out.index("Calendar Analysis Summary")
+    assert "Ordered Output Meeting" in out
+
+
 def test_calendar_file_read_error(monkeypatch, capsys) -> None:
     """Test error handling when calendar file cannot be read."""
     monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", "/nonexistent/file.ics"])
@@ -668,6 +833,33 @@ def test_analyze_calendar_date_filtering() -> None:
 
     # Clean up
     Path(tmp_path).unlink()
+
+
+def test_analyze_calendar_defaults_negative_ics_dtend_duration(tmp_path: Path) -> None:
+    """Test malformed ICS events cannot subtract from total meeting hours."""
+    calendar_path = tmp_path / "calendar.ics"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DTEND:20230701T160000Z
+        SUMMARY:Negative Duration
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+
+    meetings, stats = calendar_analyzer.analyze_calendar(
+        calendar_path,
+        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    )
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.0}
+    assert meetings[0]["duration_hours"] == calendar_analyzer.DEFAULT_DURATION_HOURS
 
 
 def test_analyze_calendar_skips_ics_all_day_events(tmp_path: Path) -> None:
@@ -1808,6 +2000,8 @@ def test_analyze_calendar_duration_timedelta_and_string_branches(monkeypatch) ->
             CalendarEvent(start, "String Hour Duration", CalendarDuration("PT3H")),
             CalendarEvent(start, "Fallback String Duration", CalendarDuration("PT30M")),
             CalendarEvent(start, "Malformed Hour Duration", CalendarDuration("PTXH")),
+            CalendarEvent(start, "Negative Timedelta Duration", timedelta(hours=-2)),
+            CalendarEvent(start, "Negative String Duration", CalendarDuration("PT-3H")),
         ]
     )
     monkeypatch.setattr("calendar_analyzer._read_ics_calendar", lambda _: calendar)
@@ -1824,5 +2018,7 @@ def test_analyze_calendar_duration_timedelta_and_string_branches(monkeypatch) ->
         "String Hour Duration": 3.0,
         "Fallback String Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
         "Malformed Hour Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
+        "Negative Timedelta Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
+        "Negative String Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
     }
-    assert stats == {"total_meetings": 4, "total_hours": 7.0}
+    assert stats == {"total_meetings": 6, "total_hours": 9.0}

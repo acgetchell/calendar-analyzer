@@ -25,6 +25,7 @@ env:
   TAPLO_VERSION: "0.10.0"
   TYPOS_VERSION: "1.46.1"
   UV_VERSION: "0.11.15"
+  ZIZMOR_VERSION: "1.25.2"
 
 jobs:
   ci:
@@ -76,6 +77,9 @@ jobs:
         uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
         with:
           tool: typos-cli@${{ env.TYPOS_VERSION }}
+
+      - name: Install zizmor
+        run: cargo install --locked zizmor --version "${{ env.ZIZMOR_VERSION }}"
 
       - name: Install shell script tools
         uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9

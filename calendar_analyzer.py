@@ -257,7 +257,7 @@ def main() -> None:
     """Run the calendar analyzer command-line interface."""
     args = _parse_args()
     requested_start_date = _parse_date_argument(args.start_date, "Start")
-    requested_end_date = _parse_date_argument(args.end_date, "End")
+    requested_end_date = _parse_date_argument(args.end_date, "End", end_of_day=True)
     _validate_date_range(requested_start_date, requested_end_date)
     excluded_title_patterns = _compile_title_exclusion_patterns(args.exclude_titles)
     start_date, end_date = _resolve_date_range(requested_start_date, requested_end_date, args.days)
@@ -446,11 +446,11 @@ def _event_duration_hours(event: Any, start: datetime) -> float:
     """Resolve a VEVENT duration in hours from duration, dtend, or a default."""
     duration = event.get("duration")
     if isinstance(duration, timedelta):
-        return duration.total_seconds() / 3600
+        return _positive_duration_value_hours(duration.total_seconds() / 3600)
 
     duration_dt = getattr(duration, "dt", None)
     if isinstance(duration_dt, timedelta):
-        return duration_dt.total_seconds() / 3600
+        return _positive_duration_value_hours(duration_dt.total_seconds() / 3600)
 
     if duration is not None:
         return _duration_string_hours(str(duration))
@@ -462,10 +462,17 @@ def _duration_string_hours(duration: str) -> float:
     """Parse simple ICS duration strings like PT1H into hours."""
     if duration.startswith("PT") and duration.endswith("H"):
         try:
-            return float(duration[2:-1])
+            return _positive_duration_value_hours(float(duration[2:-1]))
         except ValueError:
             return DEFAULT_DURATION_HOURS
     return DEFAULT_DURATION_HOURS
+
+
+def _positive_duration_value_hours(duration_hours: float) -> float:
+    """Return a positive explicit duration or the default meeting duration."""
+    if duration_hours <= 0:
+        return DEFAULT_DURATION_HOURS
+    return duration_hours
 
 
 def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
@@ -475,7 +482,7 @@ def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
         return None
 
     end_dt = convert_to_pacific(end.dt)
-    return (end_dt - start).total_seconds() / 3600
+    return _positive_duration_hours(start, end_dt)
 
 
 def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> Meeting:
@@ -507,6 +514,7 @@ def _fetch_sqlite_calendar_rows(
                 {all_day_expression}
             FROM CalendarItem
             WHERE start_date >= ? AND start_date <= ?
+            ORDER BY start_date, summary
             """  # noqa: S608
         cursor.execute(query, (start_seconds, end_seconds))
         return cursor.fetchall()
@@ -1023,12 +1031,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", help="End date for analysis (YYYY-MM-DD)")
     parser.add_argument(
         "--days",
-        type=int,
+        type=_positive_int_argument,
         default=DEFAULT_DAYS_BACK,
         help=f"Number of days to look back from end date (default: {DEFAULT_DAYS_BACK})",
     )
-    parser.add_argument("--times", type=int, default=5, help="Number of meeting times to display (default: 5)")
-    parser.add_argument("--titles", type=int, default=50, help="Number of meeting titles to display (default: 50)")
+    parser.add_argument(
+        "--times",
+        type=_positive_int_argument,
+        default=5,
+        help="Number of meeting times to display (default: 5)",
+    )
+    parser.add_argument(
+        "--titles",
+        type=_positive_int_argument,
+        default=50,
+        help="Number of meeting titles to display (default: 50)",
+    )
     parser.add_argument(
         "--exclude-title",
         action="append",
@@ -1039,16 +1057,31 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _parse_date_argument(value: str | None, label: str) -> datetime | None:
+def _positive_int_argument(value: str) -> int:
+    """Parse an argparse integer that must be greater than zero."""
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        msg = "must be a positive integer"
+        raise argparse.ArgumentTypeError(msg) from error
+    if parsed_value <= 0:
+        msg = "must be a positive integer"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed_value
+
+
+def _parse_date_argument(value: str | None, label: str, *, end_of_day: bool = False) -> datetime | None:
     """Parse an optional YYYY-MM-DD CLI date into a Pacific-aware datetime."""
     if value is None:
         return None
 
     try:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=PACIFIC)
+        parsed_date = date.fromisoformat(value)
     except ValueError:
         print(f"Error: {label} date must be in YYYY-MM-DD format")
         raise_system_exit()
+    parsed_time = time.max if end_of_day else time.min
+    return datetime.combine(parsed_date, parsed_time, tzinfo=PACIFIC)
 
 
 def _validate_date_range(start_date: datetime | None, end_date: datetime | None) -> None:
@@ -1079,7 +1112,17 @@ def _write_or_print_summary(summary: str, output: str | None) -> None:
 
 def _write_summary_to_stdout(summary: str) -> None:
     """Write the requested meeting-title report to stdout."""
-    sys.stdout.buffer.write(f"\n{summary}\n".encode())
+    summary_text = f"\n{summary}\n"
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer is not None:
+        sys.stdout.flush()
+        stdout_buffer.write(summary_text.encode())
+        stdout_buffer.flush()
+        return
+
+    write_text = sys.stdout.write
+    write_text(summary_text)
+    sys.stdout.flush()
 
 
 def _write_text_atomic(output_path: Path, content: str) -> None:
