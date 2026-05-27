@@ -4,11 +4,13 @@
 [![codecov](https://codecov.io/github/acgetchell/calendar-analyzer/graph/badge.svg?token=UWRe2AcNnm)](https://codecov.io/github/acgetchell/calendar-analyzer)
 [![CodeQL Advanced](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml/badge.svg)](https://github.com/acgetchell/calendar-analyzer/actions/workflows/codeql.yml)
 
-A simple Python script that analyzes your Apple Calendar data and provides a summary of your meetings.
+A simple Python script that analyzes Apple Calendar and Outlook calendar exports and summarizes your meetings.
 
 ## Features
 
 - Analyzes calendar events from a specified date range (defaults to past year)
+- Reads Apple Calendar `.ics`, `.icbu`, and `.sqlitedb` exports
+- Reads Outlook for Mac `.olm` archives and Outlook `.ics` or `.csv` exports
 - Provides statistics on:
   - Total number of meetings
   - Total meeting hours
@@ -46,35 +48,58 @@ See [scripts/README.md](scripts/README.md) for script linting and formatting det
 
 ## Exporting Your Calendar
 
-1. Open the Calendar app on your Mac
-2. Select the calendar(s) you want to analyze
-3. Go to File > Export and save as `.ics` file to your Documents folder
-4. Run the analyzer:
+### Apple Calendar
 
-   ```bash
-   uv run calendar-analyzer --calendar ~/Documents/your-calendar.ics
-   ```
+1. Open Calendar on your Mac.
+2. Select the calendar you want to analyze.
+3. Choose File > Export > Export.
+4. Save the `.ics` file.
+
+### Outlook for Mac
+
+1. Open Outlook for Mac.
+2. Choose File > Export.
+3. Select Calendar in the export options. You can include other item types too; the analyzer reads the calendar items from the archive.
+4. Continue through the export wizard and save the Outlook for Mac archive (`.olm`) file.
+5. If Outlook asks whether to delete exported items, choose the option to keep them in Outlook.
+
+Outlook `.ics` and `.csv` calendar exports are also supported when available.
+
+Run the analyzer with the exported file:
+
+```bash
+just run --calendar ~/Documents/your-calendar.olm
+```
 
 ## Usage
 
 ```bash
 # Basic usage (analyzes past year)
-uv run calendar-analyzer
+just run
 
 # Analyze specific date range
-uv run calendar-analyzer --start-date 2024-01-01 --end-date 2024-03-31
+just run --start-date 2024-01-01 --end-date 2024-03-31
 
 # Analyze last 90 days
-uv run calendar-analyzer --days 90
+just run --days 90
 
 # Specify custom calendar file
-uv run calendar-analyzer --calendar /path/to/your/calendar.ics
+just run --calendar /path/to/your/calendar.olm
 
 # Show top 10 meeting titles
-uv run calendar-analyzer --titles 10
+just run --titles 10
+
+# Show top 8 common meeting times
+just run --times 8
+
+# Exclude meeting titles by case-insensitive regex
+just run --exclude-title 'SVM|VMTH'
+
+# Repeat exclusions for separate title patterns
+just run --exclude-title 'SVM' --exclude-title 'VMTH|State of the Hospital'
 
 # Save results to file
-uv run calendar-analyzer --output analysis.txt
+just run --output analysis.txt
 ```
 
 The script automatically finds your most recent calendar file (unless specified), analyzes the date range, and displays or saves results.
@@ -89,7 +114,7 @@ Common recipes are listed alphabetically:
 # Run Ruff, Ty, typos, TOML checks, script checks, and tests
 just check
 
-# Run the full local CI workflow
+# Run local CI checks without generating coverage
 just ci
 
 # Generate coverage.xml and terminal coverage
@@ -97,6 +122,9 @@ just coverage
 
 # Apply Ruff, Taplo, and shell script auto-fixes
 just fix
+
+# Run the analyzer
+just run --days 90
 
 # Run pip-audit and repository Semgrep rules
 just security
@@ -108,7 +136,7 @@ just setup
 just test
 ```
 
-The local workflow mirrors CI: `just ci` runs all checks, security scans, and coverage.
+The local workflow mirrors CI: `just ci` runs all checks and security scans. Coverage is generated separately with `just coverage` and uploaded by the Codecov workflow.
 
 ### Dependency Management
 

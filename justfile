@@ -33,7 +33,7 @@ _ensure-uv:
 check: lint test
     @echo "Checks complete."
 
-ci: check security coverage
+ci: check security
     @echo "CI checks complete."
 
 coverage: _ensure-uv
@@ -47,9 +47,10 @@ fix: python-fix toml-fix script-fmt
 help-workflows:
     @echo "Common workflows:"
     @echo "  just check         # Run lint, type checks, spelling, TOML checks, script checks, and tests"
-    @echo "  just ci            # Run the full local CI workflow"
+    @echo "  just ci            # Run local CI checks without generating coverage"
     @echo "  just coverage      # Generate coverage.xml and terminal coverage"
     @echo "  just fix           # Apply Ruff, Taplo, and shell script auto-fixes"
+    @echo "  just run [args]    # Run the calendar analyzer"
     @echo "  just security      # Run pip-audit and repository Semgrep rules"
     @echo "  just setup         # Sync uv dev dependencies"
     @echo "  just test          # Run tests only"
@@ -97,6 +98,9 @@ security: pip-audit semgrep
 
 semgrep: _ensure-uv
     uv run semgrep --error --strict --timeout 30 --config semgrep.yaml .
+
+run *args: _ensure-uv
+    uv run calendar-analyzer {{args}}
 
 setup: python-sync
     @echo "Setup complete."
