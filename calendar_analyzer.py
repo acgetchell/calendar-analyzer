@@ -1065,9 +1065,7 @@ def _validate_date_range(start_date: datetime | None, end_date: datetime | None)
 def _write_or_print_summary(summary: str, output: str | None) -> None:
     """Write the summary to a file or print it when no output path is supplied."""
     if output is None:
-        # The CLI intentionally prints the requested meeting-title report by default.
-        # lgtm[py/clear-text-logging-sensitive-data]  # noqa: ERA001
-        print("\n" + summary)
+        _write_summary_to_stdout(summary)
         return
 
     try:
@@ -1077,6 +1075,11 @@ def _write_or_print_summary(summary: str, output: str | None) -> None:
         raise_system_exit()
 
     print(f"\nAnalysis saved to: {output}")
+
+
+def _write_summary_to_stdout(summary: str) -> None:
+    """Write the requested meeting-title report to stdout."""
+    sys.stdout.buffer.write(f"\n{summary}\n".encode())
 
 
 def _write_text_atomic(output_path: Path, content: str) -> None:

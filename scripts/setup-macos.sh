@@ -9,9 +9,9 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/setup-macos.sh [--no-check]
 
-Installs or verifies uv, just, taplo, typos, shellcheck, shfmt, PowerShell,
-and PSScriptAnalyzer; ensures Python 3.11 is available through uv; syncs
-development dependencies; and runs `just ci` unless --no-check is provided.
+	Installs or verifies uv, just, taplo, typos, shellcheck, shfmt, PowerShell,
+	zizmor, and PSScriptAnalyzer; ensures Python 3.11 is available through uv;
+	syncs development dependencies; and runs `just ci` unless --no-check is provided.
 EOF
 }
 
@@ -117,6 +117,7 @@ ensure_tool typos typos-cli typos-cli
 ensure_tool shellcheck shellcheck shellcheck
 ensure_tool shfmt shfmt shfmt
 ensure_tool pwsh powershell/tap/powershell powershell
+ensure_tool zizmor zizmor zizmor
 
 echo "Ensuring PSScriptAnalyzer is available..."
 pwsh -NoProfile -Command 'if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) { Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force }'

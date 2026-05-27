@@ -30,6 +30,11 @@ _ensure-uv:
     set -euo pipefail
     command -v uv >/dev/null || { echo "'uv' not found. Install with: brew install uv"; exit 1; }
 
+_ensure-zizmor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v zizmor >/dev/null || { echo "'zizmor' not found. Install with: cargo install zizmor"; exit 1; }
+
 check: lint test
     @echo "Checks complete."
 
@@ -51,9 +56,10 @@ help-workflows:
     @echo "  just coverage      # Generate coverage.xml and terminal coverage"
     @echo "  just fix           # Apply Ruff, Taplo, and shell script auto-fixes"
     @echo "  just run [args]    # Run the calendar analyzer"
-    @echo "  just security      # Run pip-audit and repository Semgrep rules"
-    @echo "  just setup         # Sync uv dev dependencies"
+    @echo "  just security      # Run pip-audit, Semgrep, and zizmor rules"
+    @echo "  just setup         # Install or verify development tools and dependencies"
     @echo "  just test          # Run tests only"
+    @echo "  just zizmor        # Run GitHub Actions security analysis"
 
 lint: python-check toml-check toml-fmt-check spell-check script-check
 
@@ -94,7 +100,7 @@ script-check: shell-check powershell-check
 
 script-fmt: shell-fmt
 
-security: pip-audit semgrep
+security: pip-audit semgrep zizmor
 
 semgrep: _ensure-uv
     uv run semgrep --error --strict --timeout 30 --config semgrep.yaml .
@@ -102,8 +108,139 @@ semgrep: _ensure-uv
 run *args: _ensure-uv
     uv run calendar-analyzer {{args}}
 
-setup: python-sync
-    @echo "Setup complete."
+setup: setup-tools
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Setting up Calendar Analyzer development environment..."
+    echo "Ensuring Python 3.11 is available through uv..."
+    uv python install 3.11
+    echo "Syncing development dependencies..."
+    uv sync --group dev
+    echo "Setup complete. Run 'just ci' when ready."
+
+setup-tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "Ensuring development tools required by just recipes are installed..."
+    echo ""
+
+    os="$(uname -s || true)"
+    have() { command -v "$1" >/dev/null 2>&1; }
+
+    install_with_brew() {
+        local formula="$1"
+        if ! have brew; then
+            return 1
+        fi
+        if brew list --versions "$formula" >/dev/null 2>&1; then
+            echo "  ok: $formula"
+        else
+            echo "  installing: $formula"
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install "$formula"
+        fi
+    }
+
+    install_with_cargo() {
+        local command_name="$1"
+        local crate="$2"
+        if have "$command_name"; then
+            echo "  ok: $command_name"
+            return
+        fi
+        if ! have cargo; then
+            echo "Missing $command_name and cargo is not available. Install Rust from https://rustup.rs, then rerun 'just setup'." >&2
+            exit 1
+        fi
+        echo "  installing with cargo: $crate"
+        cargo install --locked "$crate"
+        export PATH="$HOME/.cargo/bin:$PATH"
+    }
+
+    ensure_uv() {
+        if have uv; then
+            echo "  ok: uv"
+            return
+        fi
+        if install_with_brew uv; then
+            return
+        fi
+        echo "  installing uv with the official installer"
+        local uv_installer
+        uv_installer="$(mktemp "${TMPDIR:-/tmp}/uv-install.XXXXXX")"
+        curl -LsSf https://astral.sh/uv/install.sh -o "$uv_installer"
+        if ! sh "$uv_installer"; then
+            rm -f "$uv_installer"
+            return 1
+        fi
+        rm -f "$uv_installer"
+        export PATH="$HOME/.local/bin:$PATH"
+    }
+
+    ensure_brew_or_cargo_tool() {
+        local command_name="$1"
+        local brew_formula="$2"
+        local cargo_crate="$3"
+        if have "$command_name"; then
+            echo "  ok: $command_name"
+            return
+        fi
+        if install_with_brew "$brew_formula"; then
+            return
+        fi
+        install_with_cargo "$command_name" "$cargo_crate"
+    }
+
+    ensure_system_tool() {
+        local command_name="$1"
+        local brew_formula="$2"
+        local install_hint="$3"
+        if have "$command_name"; then
+            echo "  ok: $command_name"
+            return
+        fi
+        if install_with_brew "$brew_formula"; then
+            return
+        fi
+        echo "Missing $command_name. $install_hint" >&2
+        exit 1
+    }
+
+    ensure_uv
+    ensure_brew_or_cargo_tool just just just
+    ensure_brew_or_cargo_tool taplo taplo taplo-cli
+    ensure_brew_or_cargo_tool typos typos-cli typos-cli
+    ensure_brew_or_cargo_tool zizmor zizmor zizmor
+    ensure_system_tool shellcheck shellcheck "Install with: brew install shellcheck (macOS) or winget install koalaman.shellcheck (Windows)."
+    ensure_system_tool shfmt shfmt "Install with: brew install shfmt (macOS) or winget install mvdan.shfmt (Windows)."
+    ensure_system_tool pwsh powershell/tap/powershell "Install PowerShell: https://learn.microsoft.com/powershell/"
+
+    echo "Ensuring PSScriptAnalyzer is available..."
+    pwsh -NoProfile -Command 'if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) { Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force }'
+
+    echo ""
+    echo "Verifying required commands are available..."
+    missing=0
+    cmds=(uv just taplo typos shellcheck shfmt pwsh zizmor)
+    for cmd in "${cmds[@]}"; do
+        if have "$cmd"; then
+            echo "  ok: $cmd"
+        else
+            echo "  missing: $cmd"
+            missing=1
+        fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        echo ""
+        if [[ "$os" == "Darwin" ]]; then
+            echo "Install Homebrew or Rust, then rerun 'just setup'." >&2
+        else
+            echo "Install the missing tools with your system package manager, then rerun 'just setup'." >&2
+        fi
+        exit 1
+    fi
+
+    echo "Tooling setup complete."
 
 shell-check: _ensure-shell-tools
     #!/usr/bin/env bash
@@ -178,3 +315,6 @@ toml-fmt-check: _ensure-taplo
     else
         echo "No TOML files found to check."
     fi
+
+zizmor: _ensure-zizmor
+    zizmor .github

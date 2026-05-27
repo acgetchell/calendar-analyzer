@@ -62,6 +62,7 @@ The setup scripts install or verify:
 - `shellcheck`
 - `shfmt`
 - PowerShell (`pwsh`)
+- `zizmor`
 - `PSScriptAnalyzer`
 
 On Windows, run `just` from Git Bash or another Bash-compatible shell because the project `justfile` uses Bash recipes.
