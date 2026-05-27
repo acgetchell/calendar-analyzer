@@ -1,6 +1,7 @@
 """Tests for calendar_analyzer module."""
 
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -9,9 +10,10 @@ import zipfile
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 from unittest.mock import patch
 
+import polars as pl
 import pytest
 
 import calendar_analyzer
@@ -103,6 +105,31 @@ def create_temp_dummy_file(suffix: str = ".ics") -> str:
     """
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as dummy_file:
         return dummy_file.name
+
+
+def meeting_frame(meetings: list[dict[str, Any]]) -> pl.DataFrame:
+    """Return normalized meeting dictionaries as a reporting DataFrame."""
+    rows = [
+        {
+            "start": meeting.get("start", datetime.combine(meeting["date"], meeting["time"])),
+            "date": meeting["date"],
+            "time": meeting["time"],
+            "summary": meeting["summary"],
+            "duration_hours": meeting["duration_hours"],
+        }
+        for meeting in meetings
+    ]
+    return pl.DataFrame(rows, schema=calendar_analyzer.MEETING_FRAME_SCHEMA, orient="row")
+
+
+def analysis_result(frame: pl.DataFrame) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
+    """Return row dictionaries and aggregate stats for behavior assertions."""
+    meetings = list(frame.iter_rows(named=True))
+    stats = {
+        "total_meetings": frame.height,
+        "total_hours": 0.0 if frame.is_empty() else frame.select(pl.col("duration_hours").sum()).item(),
+    }
+    return meetings, stats
 
 
 def test_analyze_mock_ics(monkeypatch, capsys) -> None:
@@ -436,17 +463,15 @@ def test_print_calendar_export_instructions(capsys) -> None:
     out = capsys.readouterr().out
     assert "Please export your calendar from Calendar or Outlook:" in out
     assert "Apple Calendar: select the calendar, then use File > Export" in out
-    assert "Outlook for Mac: export an Outlook archive (.olm)" in out
-    assert "Outlook can also be analyzed from exported ICS or CSV calendar files" in out
+    assert "Outlook for Mac: export an Outlook archive (.olm), or export an ICS calendar when available" in out
+    assert "Outlook for Windows: export a calendar-only ICS file" in out
+    assert "Do not export a PST file" in out
     assert "just run --calendar" in out
 
 
 def test_generate_summary_no_meetings() -> None:
     """Test generate_summary with no meetings."""
-    meetings: list[calendar_analyzer.Meeting] = []
-    stats: calendar_analyzer.MeetingStats = {"total_meetings": 0, "total_hours": 0.0}
-
-    result = calendar_analyzer.generate_summary(meetings, stats)
+    result = calendar_analyzer.generate_summary(meeting_frame([]))
     assert result == "No meetings found in the specified time period."
 
 
@@ -588,6 +613,360 @@ def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
     output_path.unlink()
 
 
+def test_main_uses_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test the CLI can report from a saved Polars DataFrame before finding a calendar."""
+    source_path = tmp_path / "calendar.ics"
+    source_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Cached Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_analyzer.load_calendar_dataframe(source_path, dataframe_path, force_import=True)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    calendar_analyzer.main()
+
+    out = capsys.readouterr().out
+    assert f"Found saved Polars DataFrame at: {dataframe_path}" in out
+    assert "Cached Meeting" in out
+    assert "No calendar files found" not in out
+
+
+def test_main_import_option_refreshes_saved_dataframe(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test --import refreshes cached meeting data from the calendar export."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Stale Cached Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    capsys.readouterr()
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Imported Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--dataframe",
+            str(dataframe_path),
+            "--import",
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    calendar_analyzer.main()
+
+    out = capsys.readouterr().out
+    assert "Forcing calendar import because --import was supplied." in out
+    assert "Imported Meeting" in out
+    assert "Stale Cached Meeting" not in out
+
+
+def test_load_calendar_dataframe_tracks_icbu_inner_ics_metadata(capsys, tmp_path: Path) -> None:
+    """Test ICBU cache validity follows the embedded calendar file."""
+    icbu_path = tmp_path / "backup.icbu"
+    icbu_path.mkdir()
+    ics_path = icbu_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    ics_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Stale Inner Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path, force_import=True)
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["source_path"] == str(ics_path.resolve())
+    capsys.readouterr()
+
+    ics_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Imported Inner Meeting With New Size
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+
+    frame = calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path)
+
+    out = capsys.readouterr().out
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in out
+    assert [row["summary"] for row in frame.iter_rows(named=True)] == ["Imported Inner Meeting With New Size"]
+
+
+def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata(capsys, tmp_path: Path) -> None:
+    """Test ICBU cache metadata prefers the embedded SQLite database."""
+    icbu_path = tmp_path / "backup.icbu"
+    icbu_path.mkdir()
+    sqlite_path = icbu_path / "Calendar.sqlitedb"
+    (icbu_path / "calendar.ics").write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:ICS Fallback Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    with closing(sqlite3.connect(sqlite_path)) as conn:
+        conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+        conn.commit()
+
+    dataframe_path = tmp_path / "meetings.parquet"
+    frame = calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path, force_import=True)
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert frame.is_empty()
+    assert metadata["source_path"] == str(sqlite_path.resolve())
+    assert f"Found SQLite database in ICBU backup: {sqlite_path}" in capsys.readouterr().out
+
+
+def test_main_reimports_when_saved_dataframe_is_corrupt(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test a corrupt saved DataFrame is rebuilt when the calendar source is available."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Recovered Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    dataframe_path.write_text("not parquet", encoding="utf-8")
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    calendar_analyzer.main()
+
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame:" in out
+    assert "Saved Polars DataFrame could not be read; importing calendar export instead." in out
+    assert "Recovered Meeting" in out
+
+
+def test_main_exits_for_corrupt_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test cache-only runs fail clearly when the saved DataFrame cannot be read."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Cached Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    dataframe_path.write_text("not parquet", encoding="utf-8")
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame:" in out
+    assert "Saved Polars DataFrame could not be read; importing calendar export instead." not in out
+    assert "No calendar files found" not in out
+
+
+def test_main_exits_for_saved_dataframe_missing_columns(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test cache-only runs report saved DataFrames with missing schema columns."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Cached Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    pl.read_parquet(dataframe_path).drop("duration_hours").write_parquet(dataframe_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame: missing columns ['duration_hours']" in out
+    assert "No calendar files found" not in out
+
+
+def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test failed cache rewrites keep the previous readable DataFrame."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Original Cache
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230702T170000Z
+        DURATION:PT2H
+        SUMMARY:Replacement Cache
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+
+    def fail_metadata(*_args, **_kwargs) -> NoReturn:
+        message = "simulated metadata failure"
+        raise OSError(message)
+
+    monkeypatch.setattr(calendar_analyzer, "_cache_metadata", fail_metadata)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+
+    assert exc_info.value.code == 1
+    assert "Error saving Polars DataFrame: simulated metadata failure" in capsys.readouterr().out
+    rows = list(pl.read_parquet(dataframe_path).iter_rows(named=True))
+    assert [row["summary"] for row in rows] == ["Original Cache"]
+
+
 def test_main_supports_text_only_stdout(monkeypatch) -> None:
     """Test summary output works when stdout has no binary buffer."""
     ics_content = textwrap.dedent("""
@@ -694,10 +1073,12 @@ def test_analyze_calendar_with_different_duration_formats() -> None:
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    _, stats = calendar_analyzer.analyze_calendar(
-        Path(tmp_path),
-        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    _, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            Path(tmp_path),
+            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     # Should have 2 meetings
@@ -713,65 +1094,65 @@ def test_generate_summary_with_long_titles() -> None:
     """Test generate_summary with very long meeting titles."""
     # Create meetings with long titles
     long_title = "A" * 150  # 150 character title
-    meetings: list[calendar_analyzer.Meeting] = [
-        {
-            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": long_title,
-            "duration_hours": 1.0,
-        },
-        {
-            "date": datetime(2023, 7, 3, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 14, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Short title",
-            "duration_hours": 1.0,
-        },
-    ]
+    meetings = meeting_frame(
+        [
+            {
+                "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": long_title,
+                "duration_hours": 1.0,
+            },
+            {
+                "date": datetime(2023, 7, 3, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 14, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Short title",
+                "duration_hours": 1.0,
+            },
+        ]
+    )
 
-    stats: calendar_analyzer.MeetingStats = {"total_meetings": 2, "total_hours": 2.0}
-
-    result = calendar_analyzer.generate_summary(meetings, stats, calendar_analyzer.SummaryOptions(num_titles=5))
+    result = calendar_analyzer.generate_summary(meetings, calendar_analyzer.SummaryOptions(num_titles=5))
 
     # Long title should be truncated
     assert "A" * 100 + "..." in result
     assert "Short title" in result
     assert "Total Meetings: 2" in result
-    assert "Average Meetings per Day: 1.0" in result
+    assert "Average Meetings per Day: 0.7" in result
 
 
 def test_generate_summary_limits_common_times_and_titles() -> None:
     """Test summary uses requested limits for common times and titles."""
-    meetings: list[calendar_analyzer.Meeting] = [
-        {
-            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 9, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Frequent",
-            "duration_hours": 1.0,
-        },
-        {
-            "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 9, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Frequent",
-            "duration_hours": 1.0,
-        },
-        {
-            "date": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Second",
-            "duration_hours": 1.0,
-        },
-        {
-            "date": datetime(2023, 7, 3, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Third",
-            "duration_hours": 1.0,
-        },
-    ]
-    stats: calendar_analyzer.MeetingStats = {"total_meetings": 4, "total_hours": 4.0}
+    meetings = meeting_frame(
+        [
+            {
+                "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 9, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Frequent",
+                "duration_hours": 1.0,
+            },
+            {
+                "date": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 9, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Frequent",
+                "duration_hours": 1.0,
+            },
+            {
+                "date": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Second",
+                "duration_hours": 1.0,
+            },
+            {
+                "date": datetime(2023, 7, 3, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Third",
+                "duration_hours": 1.0,
+            },
+        ]
+    )
 
     result = calendar_analyzer.generate_summary(
         meetings,
-        stats,
         calendar_analyzer.SummaryOptions(num_titles=2, num_times=1),
     )
 
@@ -786,19 +1167,19 @@ def test_generate_summary_limits_common_times_and_titles() -> None:
 
 def test_generate_summary_uses_requested_period_for_average() -> None:
     """Test summary averages use the requested period rather than meeting spread."""
-    meetings: list[calendar_analyzer.Meeting] = [
-        {
-            "date": datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC).date(),
-            "time": datetime(2023, 7, 5, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
-            "summary": "Middle Meeting",
-            "duration_hours": 1.0,
-        }
-    ]
-    stats: calendar_analyzer.MeetingStats = {"total_meetings": 1, "total_hours": 1.0}
+    meetings = meeting_frame(
+        [
+            {
+                "date": datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 5, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Middle Meeting",
+                "duration_hours": 1.0,
+            }
+        ]
+    )
 
     result = calendar_analyzer.generate_summary(
         meetings,
-        stats,
         calendar_analyzer.SummaryOptions(
             period_start=datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
             period_end=datetime(2023, 7, 11, tzinfo=calendar_analyzer.PACIFIC),
@@ -807,8 +1188,39 @@ def test_generate_summary_uses_requested_period_for_average() -> None:
 
     assert "- From: July 01, 2023" in result
     assert "- To:   July 11, 2023" in result
-    assert "- Span: 10 days" in result
+    assert "- Span: 11 days" in result
     assert "- Average Meetings per Day: 0.1" in result
+
+
+def test_generate_summary_shows_imported_coverage_and_query_range() -> None:
+    """Test summary distinguishes imported data coverage from the query range."""
+    meetings = meeting_frame(
+        [
+            {
+                "date": datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "time": datetime(2023, 7, 5, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time(),
+                "summary": "Middle Meeting",
+                "duration_hours": 1.0,
+            }
+        ]
+    )
+
+    result = calendar_analyzer.generate_summary(
+        meetings,
+        calendar_analyzer.SummaryOptions(
+            period_start=datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            period_end=datetime(2023, 7, 31, tzinfo=calendar_analyzer.PACIFIC),
+            data_start=datetime(2023, 1, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            data_end=datetime(2023, 12, 31, tzinfo=calendar_analyzer.PACIFIC).date(),
+        ),
+    )
+
+    assert "Imported Data Coverage:" in result
+    assert "- From: January 01, 2023" in result
+    assert "- To:   December 31, 2023" in result
+    assert "Query Date Range:" in result
+    assert "- From: July 01, 2023" in result
+    assert "- To:   July 31, 2023" in result
 
 
 def test_analyze_calendar_date_filtering() -> None:
@@ -836,10 +1248,12 @@ def test_analyze_calendar_date_filtering() -> None:
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        Path(tmp_path),
-        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            Path(tmp_path),
+            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 5, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     # Should only have the meeting in range
@@ -867,10 +1281,12 @@ def test_analyze_calendar_defaults_negative_ics_dtend_duration(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        calendar_path,
-        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            calendar_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     assert stats == {"total_meetings": 1, "total_hours": 1.0}
@@ -896,9 +1312,24 @@ def test_analyze_calendar_skips_ics_all_day_events(tmp_path: Path) -> None:
         SUMMARY:Free Calendar Hold
         END:VEVENT
         BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DTEND:20230701T180000Z
+        X-MICROSOFT-CDO-BUSYSTATUS:OOF
+        SUMMARY:Out Of Office Hold
+        END:VEVENT
+        BEGIN:VEVENT
         DTSTART:20230702T000000
         DURATION:PT1H
         SUMMARY:Midnight Export Block
+        END:VEVENT
+        BEGIN:VEVENT
+        DTSTART:20230702T000000Z
+        SUMMARY:UTC Midnight Vacation Export
+        END:VEVENT
+        BEGIN:VEVENT
+        DTSTART:20230701T120000Z
+        X-MICROSOFT-CDO-ALLDAYEVENT:TRUE
+        SUMMARY:Microsoft All Day Vacation
         END:VEVENT
         BEGIN:VEVENT
         DTSTART:20230703T090000
@@ -915,10 +1346,12 @@ def test_analyze_calendar_skips_ics_all_day_events(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        calendar_path,
-        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            calendar_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     assert stats == {"total_meetings": 1, "total_hours": 1.0}
@@ -1026,13 +1459,13 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys) -> None:
 
 @patch("pathlib.Path.home")
 def test_get_calendar_path_auto_discovery_ignores_csv_files(mock_home, capsys) -> None:
-    """Test auto-discovery ignores generic CSV files unless explicitly requested."""
+    """Test auto-discovery ignores CSV files unless explicitly requested."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
         mock_home.return_value = home_path
         documents_dir = home_path / "Documents"
         documents_dir.mkdir()
-        (documents_dir / "not-a-calendar.csv").write_text("Amount,Description\n1.00,Coffee\n")
+        (documents_dir / "export.csv").write_text("Subject,Start Date,Start Time\nMeeting,07/01/2023,10:00 AM\n")
 
         with pytest.raises(SystemExit) as exc_info:
             calendar_analyzer.get_calendar_path()
@@ -1040,7 +1473,7 @@ def test_get_calendar_path_auto_discovery_ignores_csv_files(mock_home, capsys) -
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
         assert "✗ No calendar files found" in out
-        assert "not-a-calendar.csv" not in out
+        assert "export.csv" not in out
 
 
 @patch("pathlib.Path.home")
@@ -1174,22 +1607,16 @@ def test_analyze_calendar_icbu_with_sqlite(capsys) -> None:
         icbu_path = Path(tmp_dir) / "backup.icbu"
         icbu_path.mkdir()
 
-        # Create a fake SQLite database file inside ICBU
         sqlite_path = icbu_path / "Calendar.sqlitedb"
-        sqlite_path.write_text("fake sqlite content")
+        with closing(sqlite3.connect(sqlite_path)) as conn:
+            conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+            conn.commit()
 
-        # Mock the analyze_sqlite_calendar function
-        with patch("calendar_analyzer.analyze_sqlite_calendar") as mock_sqlite:
-            mock_sqlite.return_value = ([], {"total_meetings": 0, "total_hours": 0})
+        result = calendar_analyzer.analyze_calendar(icbu_path)
 
-            result = calendar_analyzer.analyze_calendar(icbu_path)
-
-            # Should have called analyze_sqlite_calendar
-            mock_sqlite.assert_called_once_with(sqlite_path, None, None, calendar_analyzer.DEFAULT_DAYS_BACK)
-            assert result == ([], {"total_meetings": 0, "total_hours": 0})
-
-            out = capsys.readouterr().out
-            assert f"Found SQLite database in ICBU backup: {sqlite_path}" in out
+        assert result.is_empty()
+        out = capsys.readouterr().out
+        assert f"Found SQLite database in ICBU backup: {sqlite_path}" in out
 
 
 def test_analyze_calendar_with_sqlite_file(capsys) -> None:
@@ -1209,10 +1636,12 @@ def test_analyze_calendar_with_sqlite_file(capsys) -> None:
             )
             conn.commit()
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            sqlite_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                sqlite_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
 
         assert stats == {"total_meetings": 1, "total_hours": 1.5}
@@ -1238,17 +1667,19 @@ def test_analyze_calendar_with_sqlite_file_honors_days_back() -> None:
             )
             conn.commit()
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            sqlite_path,
-            end_date=datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            days_back=1,
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                sqlite_path,
+                end_date=datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                days_back=1,
+            )
         )
 
         assert meetings == []
         assert stats == {"total_meetings": 0, "total_hours": 0.0}
 
 
-def test_analyze_sqlite_calendar_skips_all_day_rows() -> None:
+def test_analyze_calendar_skips_sqlite_all_day_rows() -> None:
     """Test SQLite calendar analysis excludes all-day-like rows."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
@@ -1296,10 +1727,12 @@ def test_analyze_sqlite_calendar_skips_all_day_rows() -> None:
             )
             conn.commit()
 
-        meetings, stats = calendar_analyzer.analyze_sqlite_calendar(
-            sqlite_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                sqlite_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
 
         assert stats == {"total_meetings": 1, "total_hours": 1.0}
@@ -1325,10 +1758,12 @@ def test_analyze_calendar_with_olm_file() -> None:
     tmp_path = create_temp_olm_file(calendar_xml)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            Path(tmp_path),
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         Path(tmp_path).unlink()
@@ -1338,7 +1773,7 @@ def test_analyze_calendar_with_olm_file() -> None:
     assert meetings[0]["time"].hour == 10
 
 
-def test_analyze_olm_calendar_defaults_missing_end_and_summary() -> None:
+def test_analyze_calendar_defaults_missing_olm_end_and_summary() -> None:
     """Test OLM calendar analysis defaults optional appointment fields."""
     calendar_xml = textwrap.dedent("""
     <appointments>
@@ -1350,10 +1785,12 @@ def test_analyze_olm_calendar_defaults_missing_end_and_summary() -> None:
     tmp_path = create_temp_olm_file(calendar_xml)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_olm_calendar(
-            Path(tmp_path),
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         Path(tmp_path).unlink()
@@ -1362,7 +1799,36 @@ def test_analyze_olm_calendar_defaults_missing_end_and_summary() -> None:
     assert meetings[0]["summary"] == "No Title"
 
 
-def test_analyze_olm_calendar_filters_requested_range() -> None:
+def test_analyze_calendar_treats_olm_iso_without_timezone_as_utc() -> None:
+    """Test OLM combined ISO timestamps without Z are interpreted as UTC."""
+    calendar_xml = textwrap.dedent("""
+    <appointments>
+      <appointment>
+        <OPFCalendarEventCopySummary>OLM UTC-ish Meeting</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-07-01T17:00:00</OPFCalendarEventCopyStartTime>
+        <OPFCalendarEventCopyEndTime>2023-07-01T18:30:00</OPFCalendarEventCopyEndTime>
+      </appointment>
+    </appointments>
+    """)
+    tmp_path = create_temp_olm_file(calendar_xml)
+
+    try:
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
+        )
+    finally:
+        Path(tmp_path).unlink()
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.5}
+    assert meetings[0]["summary"] == "OLM UTC-ish Meeting"
+    assert meetings[0]["time"].hour == 10
+
+
+def test_analyze_calendar_filters_requested_olm_range() -> None:
     """Test OLM calendar analysis only includes appointments in the requested range."""
     calendar_xml = textwrap.dedent("""
     <appointments>
@@ -1381,10 +1847,12 @@ def test_analyze_olm_calendar_filters_requested_range() -> None:
     tmp_path = create_temp_olm_file(calendar_xml)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_olm_calendar(
-            Path(tmp_path),
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 4, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 4, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         Path(tmp_path).unlink()
@@ -1393,7 +1861,7 @@ def test_analyze_olm_calendar_filters_requested_range() -> None:
     assert [meeting["summary"] for meeting in meetings] == ["In Range"]
 
 
-def test_analyze_olm_calendar_skips_all_day_and_date_only_appointments() -> None:
+def test_analyze_calendar_skips_olm_all_day_and_date_only_appointments() -> None:
     """Test OLM analysis excludes all-day-like appointments."""
     calendar_xml = textwrap.dedent("""
     <appointments>
@@ -1420,6 +1888,16 @@ def test_analyze_olm_calendar_skips_all_day_and_date_only_appointments() -> None
         <OPFCalendarEventCopyFreeBusyStatus>0</OPFCalendarEventCopyFreeBusyStatus>
       </appointment>
       <appointment>
+        <OPFCalendarEventCopySummary>Out Of Office Hold</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-07-01T17:00:00Z</OPFCalendarEventCopyStartTime>
+        <OPFCalendarEventCopyEndTime>2023-07-01T18:00:00Z</OPFCalendarEventCopyEndTime>
+        <OPFCalendarEventCopyFreeBusyStatus>3</OPFCalendarEventCopyFreeBusyStatus>
+      </appointment>
+      <appointment>
+        <OPFCalendarEventCopySummary>UTC Midnight Default End</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-07-02T00:00:00Z</OPFCalendarEventCopyStartTime>
+      </appointment>
+      <appointment>
         <OPFCalendarEventCopySummary>Midnight Export Block</OPFCalendarEventCopySummary>
         <OPFCalendarEventCopyStartTime>2023-07-02T00:00:00</OPFCalendarEventCopyStartTime>
         <OPFCalendarEventCopyEndTime>2023-07-02T01:00:00</OPFCalendarEventCopyEndTime>
@@ -1436,10 +1914,12 @@ def test_analyze_olm_calendar_skips_all_day_and_date_only_appointments() -> None
     tmp_path = create_temp_olm_file(calendar_xml)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_olm_calendar(
-            Path(tmp_path),
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         Path(tmp_path).unlink()
@@ -1449,7 +1929,7 @@ def test_analyze_olm_calendar_skips_all_day_and_date_only_appointments() -> None
     assert meetings[0]["time"].hour == 10
 
 
-def test_analyze_olm_calendar_without_calendar_xml(capsys) -> None:
+def test_analyze_calendar_without_olm_calendar_xml(capsys) -> None:
     """Test OLM calendar analysis reports archives without Calendar.xml."""
     with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -1458,7 +1938,7 @@ def test_analyze_olm_calendar_without_calendar_xml(capsys) -> None:
 
     try:
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
     finally:
         tmp_path.unlink()
 
@@ -1466,7 +1946,7 @@ def test_analyze_olm_calendar_without_calendar_xml(capsys) -> None:
     assert "Error parsing OLM calendar: No Calendar.xml entries found in OLM archive." in capsys.readouterr().out
 
 
-def test_analyze_olm_calendar_bad_archive(capsys) -> None:
+def test_analyze_calendar_bad_olm_archive(capsys) -> None:
     """Test OLM calendar analysis reports unreadable OLM archives."""
     with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
         tmp.write(b"not a zip archive")
@@ -1474,7 +1954,7 @@ def test_analyze_olm_calendar_bad_archive(capsys) -> None:
 
     try:
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
     finally:
         tmp_path.unlink()
 
@@ -1482,7 +1962,7 @@ def test_analyze_olm_calendar_bad_archive(capsys) -> None:
     assert "Error reading OLM calendar:" in capsys.readouterr().out
 
 
-def test_analyze_olm_calendar_bad_xml(capsys) -> None:
+def test_analyze_calendar_bad_olm_xml(capsys) -> None:
     """Test OLM calendar analysis reports malformed Calendar.xml content."""
     with tempfile.NamedTemporaryFile(suffix=".olm", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -1491,7 +1971,7 @@ def test_analyze_olm_calendar_bad_xml(capsys) -> None:
 
     try:
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
     finally:
         tmp_path.unlink()
 
@@ -1500,7 +1980,7 @@ def test_analyze_olm_calendar_bad_xml(capsys) -> None:
     assert "Error parsing OLM calendar: Accounts/Calendar.xml is not valid XML:" in out
 
 
-def test_analyze_olm_calendar_errors_when_no_start_dates_parse(capsys) -> None:
+def test_analyze_calendar_errors_when_no_olm_start_dates_parse(capsys) -> None:
     """Test OLM calendar analysis reports unsupported date formats."""
     calendar_xml = textwrap.dedent("""
     <appointments>
@@ -1514,7 +1994,7 @@ def test_analyze_olm_calendar_errors_when_no_start_dates_parse(capsys) -> None:
 
     try:
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
     finally:
         Path(tmp_path).unlink()
 
@@ -1524,7 +2004,7 @@ def test_analyze_olm_calendar_errors_when_no_start_dates_parse(capsys) -> None:
     assert "not-a-date" in out
 
 
-def test_analyze_olm_calendar_errors_when_split_start_time_invalid(capsys) -> None:
+def test_analyze_calendar_errors_when_olm_split_start_time_invalid(capsys) -> None:
     """Test split OLM dates with invalid times are not mistaken for all-day events."""
     calendar_xml = textwrap.dedent("""
     <appointments>
@@ -1539,7 +2019,7 @@ def test_analyze_olm_calendar_errors_when_split_start_time_invalid(capsys) -> No
 
     try:
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_olm_calendar(Path(tmp_path))
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
     finally:
         Path(tmp_path).unlink()
 
@@ -1558,10 +2038,12 @@ def test_analyze_calendar_with_explicit_outlook_csv_file() -> None:
         tmp_path = Path(tmp.name)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            tmp_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                tmp_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         tmp_path.unlink()
@@ -1571,36 +2053,36 @@ def test_analyze_calendar_with_explicit_outlook_csv_file() -> None:
     assert meetings[0]["time"].hour == 10
 
 
-def test_analyze_outlook_csv_calendar_read_error(capsys, tmp_path: Path) -> None:
+def test_analyze_calendar_outlook_csv_read_error(capsys, tmp_path: Path) -> None:
     """Test Outlook CSV analysis reports unreadable files."""
     missing_path = tmp_path / "missing.csv"
 
     with pytest.raises(SystemExit) as exc_info:
-        calendar_analyzer.analyze_outlook_csv_calendar(missing_path)
+        calendar_analyzer.analyze_calendar(missing_path)
 
     assert exc_info.value.code == 1
     assert "Error reading Outlook CSV calendar:" in capsys.readouterr().out
 
 
-def test_analyze_outlook_csv_calendar_requires_header(capsys, tmp_path: Path) -> None:
+def test_analyze_calendar_outlook_csv_requires_header(capsys, tmp_path: Path) -> None:
     """Test Outlook CSV analysis reports an empty CSV file."""
     csv_path = tmp_path / "empty.csv"
     csv_path.write_text("", encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
-        calendar_analyzer.analyze_outlook_csv_calendar(csv_path)
+        calendar_analyzer.analyze_calendar(csv_path)
 
     assert exc_info.value.code == 1
     assert "Error parsing Outlook CSV calendar: CSV header row is missing." in capsys.readouterr().out
 
 
-def test_analyze_outlook_csv_calendar_requires_start_columns(capsys, tmp_path: Path) -> None:
+def test_analyze_calendar_outlook_csv_requires_start_columns(capsys, tmp_path: Path) -> None:
     """Test Outlook CSV analysis rejects non-calendar CSV files."""
     csv_path = tmp_path / "not-calendar.csv"
     csv_path.write_text("Amount,Description\n1.00,Coffee\n", encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
-        calendar_analyzer.analyze_outlook_csv_calendar(csv_path)
+        calendar_analyzer.analyze_calendar(csv_path)
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out
@@ -1608,7 +2090,7 @@ def test_analyze_outlook_csv_calendar_requires_start_columns(capsys, tmp_path: P
     assert "CSV must include Outlook start columns" in out
 
 
-def test_analyze_outlook_csv_calendar_filters_requested_range(tmp_path: Path) -> None:
+def test_analyze_calendar_filters_requested_outlook_csv_range(tmp_path: Path) -> None:
     """Test Outlook CSV analysis only includes rows in the requested range."""
     csv_path = tmp_path / "calendar.csv"
     csv_path.write_text(
@@ -1620,32 +2102,37 @@ def test_analyze_outlook_csv_calendar_filters_requested_range(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    meetings, stats = calendar_analyzer.analyze_outlook_csv_calendar(
-        csv_path,
-        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 4, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            csv_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 4, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     assert stats == {"total_meetings": 1, "total_hours": 1.0}
     assert [meeting["summary"] for meeting in meetings] == ["In Range"]
 
 
-def test_analyze_outlook_csv_calendar_skips_date_only_rows() -> None:
+def test_analyze_calendar_skips_outlook_csv_date_only_rows() -> None:
     """Test Outlook CSV all-day-like rows are excluded."""
     with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", encoding="utf-8", newline="", delete=False) as tmp:
         tmp.write("Subject,Start Date,Start Time,End Date,End Time,Show Time As\n")
         tmp.write("CSV Timed Meeting,07/01/2023,10:00 AM,07/01/2023,11:00 AM,Busy\n")
         tmp.write("CSV Date Only Event,07/01/2023,,07/01/2023,,Busy\n")
         tmp.write("CSV Free Hold,07/01/2023,12:00 PM,07/01/2023,1:00 PM,Free\n")
+        tmp.write("CSV Out Of Office Hold,07/01/2023,5:00 PM,07/01/2023,6:00 PM,Out of Office\n")
         tmp.write("CSV Midnight Export Block,07/02/2023,12:00 AM,07/02/2023,1:00 AM,Busy\n")
         tmp.write("CSV Workday Block,07/03/2023,9:00 AM,07/03/2023,5:00 PM,Busy\n")
         tmp_path = Path(tmp.name)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_outlook_csv_calendar(
-            tmp_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                tmp_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         tmp_path.unlink()
@@ -1654,7 +2141,7 @@ def test_analyze_outlook_csv_calendar_skips_date_only_rows() -> None:
     assert [meeting["summary"] for meeting in meetings] == ["CSV Timed Meeting"]
 
 
-def test_analyze_outlook_csv_calendar_skips_combined_date_only_start() -> None:
+def test_analyze_calendar_skips_outlook_csv_combined_date_only_start() -> None:
     """Test combined Outlook Start columns need a time component."""
     with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", encoding="utf-8", newline="", delete=False) as tmp:
         tmp.write("Subject,Start,End\n")
@@ -1663,10 +2150,12 @@ def test_analyze_outlook_csv_calendar_skips_combined_date_only_start() -> None:
         tmp_path = Path(tmp.name)
 
     try:
-        meetings, stats = calendar_analyzer.analyze_outlook_csv_calendar(
-            tmp_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                tmp_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
     finally:
         tmp_path.unlink()
@@ -1675,7 +2164,7 @@ def test_analyze_outlook_csv_calendar_skips_combined_date_only_start() -> None:
     assert [meeting["summary"] for meeting in meetings] == ["CSV Combined Timed"]
 
 
-def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:
+def test_analyze_calendar_defaults_missing_sqlite_summary() -> None:
     """Test SQLite rows use the default title when summary is empty."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
@@ -1692,24 +2181,26 @@ def test_analyze_sqlite_calendar_defaults_missing_summary() -> None:
             )
             conn.commit()
 
-        meetings, stats = calendar_analyzer.analyze_sqlite_calendar(
-            sqlite_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                sqlite_path,
+                datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
 
         assert stats == {"total_meetings": 1, "total_hours": 1.0}
         assert meetings[0]["summary"] == "No Title"
 
 
-def test_analyze_sqlite_calendar_read_error(capsys) -> None:
+def test_analyze_calendar_sqlite_read_error(capsys) -> None:
     """Test SQLite analysis reports database read errors."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         sqlite_path = Path(tmp_dir) / "calendar.sqlitedb"
         sqlite_path.write_text("not a sqlite database")
 
         with pytest.raises(SystemExit) as exc_info:
-            calendar_analyzer.analyze_sqlite_calendar(sqlite_path)
+            calendar_analyzer.analyze_calendar(sqlite_path)
 
         assert exc_info.value.code == 1
         assert "Error reading SQLite calendar:" in capsys.readouterr().out
@@ -1737,10 +2228,12 @@ def test_analyze_calendar_icbu_with_ics_fallback(capsys) -> None:
         ics_path = icbu_path / "calendar.ics"
         ics_path.write_text(ics_content)
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            icbu_path,
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                icbu_path,
+                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
 
         assert stats["total_meetings"] == 1
@@ -1780,10 +2273,12 @@ def test_analyze_calendar_icbu_uses_sorted_ics_fallback(capsys) -> None:
         selected_ics_path.write_text(first_ics)
         (icbu_path / "z-calendar.ics").write_text(second_ics)
 
-        meetings, stats = calendar_analyzer.analyze_calendar(
-            icbu_path,
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                icbu_path,
+                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
         )
 
         assert stats["total_meetings"] == 1
@@ -1845,6 +2340,18 @@ def test_analyze_calendar_with_malformed_ics(capsys) -> None:
     Path(tmp_path).unlink()
 
 
+def test_analyze_calendar_rejects_pst_files(capsys, tmp_path: Path) -> None:
+    """Test PST files fail with intentional calendar-only export guidance."""
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"not an Outlook calendar export")
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(pst_path)
+
+    assert exc_info.value.code == 1
+    assert "Outlook PST files are intentionally unsupported" in capsys.readouterr().out
+
+
 def test_analyze_calendar_default_date_range() -> None:
     """Test analyze_calendar with default date ranges (no start/end specified)."""
     # Use a recent date that would be within the default 365-day range
@@ -1865,10 +2372,9 @@ def test_analyze_calendar_default_date_range() -> None:
     tmp_path = create_temp_ics_file(ics_content)
 
     # Test with default date range (past 365 days)
-    meetings, stats = calendar_analyzer.analyze_calendar(Path(tmp_path))
+    meetings, stats = analysis_result(calendar_analyzer.analyze_calendar(Path(tmp_path)))
 
     # Should process the calendar and find the recent meeting
-    assert isinstance(meetings, list)
     assert isinstance(stats, dict)
     assert stats["total_meetings"] == 1
     assert stats["total_hours"] == 1.0
@@ -1898,10 +2404,12 @@ def test_analyze_calendar_with_non_datetime_events() -> None:
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        Path(tmp_path),
-        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            Path(tmp_path),
+            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     # Should only process the datetime event, not the all-day event
@@ -1938,10 +2446,12 @@ def test_analyze_calendar_duration_parsing_edge_cases() -> None:
 
     tmp_path = create_temp_ics_file(ics_content)
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        Path(tmp_path),
-        datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            Path(tmp_path),
+            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     # Should process timed meetings, with fallback durations where needed
@@ -2021,10 +2531,12 @@ def test_analyze_calendar_duration_timedelta_and_string_branches(monkeypatch) ->
     )
     monkeypatch.setattr("calendar_analyzer._read_ics_calendar", lambda _: calendar)
 
-    meetings, stats = calendar_analyzer.analyze_calendar(
-        Path("fake.ics"),
-        datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-        datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            Path("fake.ics"),
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
     )
 
     durations_by_title = {meeting["summary"]: meeting["duration_hours"] for meeting in meetings}

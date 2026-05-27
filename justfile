@@ -9,6 +9,11 @@ _ensure-powershell-tools:
     command -v pwsh >/dev/null || { echo "'pwsh' not found. Install PowerShell: https://learn.microsoft.com/powershell/"; exit 1; }
     pwsh -NoProfile -Command 'if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) { throw "PSScriptAnalyzer is not installed. Run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force" }'
 
+_ensure-rumdl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v rumdl >/dev/null || { echo "'rumdl' not found. Install with: brew install rumdl (macOS) or cargo install rumdl"; exit 1; }
+
 _ensure-shell-tools:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -47,7 +52,7 @@ coverage: _ensure-uv
 default:
     @just --list
 
-fix: python-fix toml-fix script-fmt
+fix: python-fix toml-fix markdown-fix script-fmt
 
 help-workflows:
     @echo "Common workflows:"
@@ -55,13 +60,42 @@ help-workflows:
     @echo "  just ci            # Run local CI checks without generating coverage"
     @echo "  just coverage      # Generate coverage.xml and terminal coverage"
     @echo "  just fix           # Apply Ruff, Taplo, and shell script auto-fixes"
+    @echo "  just markdown-check # Check Markdown formatting and style"
     @echo "  just run [args]    # Run the calendar analyzer"
     @echo "  just security      # Run pip-audit, Semgrep, and zizmor rules"
     @echo "  just setup         # Install or verify development tools and dependencies"
     @echo "  just test          # Run tests only"
     @echo "  just zizmor        # Run GitHub Actions security analysis"
 
-lint: python-check toml-check toml-fmt-check spell-check script-check
+lint: python-check toml-check toml-fmt-check markdown-check spell-check script-check
+
+markdown-check: _ensure-rumdl
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=()
+    while IFS= read -r -d '' file; do
+        files+=("$file")
+    done < <(git ls-files -z '*.md')
+    if [ "${#files[@]}" -gt 0 ]; then
+        printf '%s\0' "${files[@]}" | xargs -0 -n100 rumdl check
+    else
+        echo "No Markdown files found to check."
+    fi
+
+markdown-fix: _ensure-rumdl
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=()
+    while IFS= read -r -d '' file; do
+        files+=("$file")
+    done < <(git ls-files -z '*.md')
+    if [ "${#files[@]}" -gt 0 ]; then
+        printf '%s\0' "${files[@]}" | xargs -0 -n100 rumdl check --fix
+    else
+        echo "No Markdown files found to format."
+    fi
+
+markdown-lint: markdown-check
 
 pip-audit: _ensure-uv
     uv run pip-audit --skip-editable
@@ -208,6 +242,7 @@ setup-tools:
 
     ensure_uv
     ensure_brew_or_cargo_tool just just just
+    ensure_brew_or_cargo_tool rumdl rumdl rumdl
     ensure_brew_or_cargo_tool taplo taplo taplo-cli
     ensure_brew_or_cargo_tool typos typos-cli typos-cli
     ensure_brew_or_cargo_tool zizmor zizmor zizmor
@@ -221,7 +256,7 @@ setup-tools:
     echo ""
     echo "Verifying required commands are available..."
     missing=0
-    cmds=(uv just taplo typos shellcheck shfmt pwsh zizmor)
+    cmds=(uv just rumdl taplo typos shellcheck shfmt pwsh zizmor)
     for cmd in "${cmds[@]}"; do
         if have "$cmd"; then
             echo "  ok: $cmd"

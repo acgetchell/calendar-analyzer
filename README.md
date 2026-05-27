@@ -11,6 +11,8 @@ A simple Python script that analyzes Apple Calendar and Outlook calendar exports
 - Analyzes calendar events from a specified date range (defaults to past year)
 - Reads Apple Calendar `.ics`, `.icbu`, and `.sqlitedb` exports
 - Reads Outlook for Mac `.olm` archives and Outlook `.ics` or `.csv` exports
+- Does not read Outlook `.PST` files by design; use `.ics` for calendar-only exports
+- Saves normalized meeting data as a Polars-readable Parquet cache for faster repeated reports
 - Provides statistics on:
   - Total number of meetings
   - Total meeting hours
@@ -21,7 +23,8 @@ A simple Python script that analyzes Apple Calendar and Outlook calendar exports
 
 ## Prerequisites
 
-This project uses `uv` for Python dependencies and `just` for local workflows. The setup scripts install or verify the required tools, including script linters, and sync development dependencies.
+This project uses `uv` for Python dependencies and `just` for local workflows. The setup scripts install or verify
+the required tools, including script linters, and sync development dependencies.
 
 ```bash
 # macOS
@@ -63,12 +66,32 @@ See [scripts/README.md](scripts/README.md) for script linting and formatting det
 4. Continue through the export wizard and save the Outlook for Mac archive (`.olm`) file.
 5. If Outlook asks whether to delete exported items, choose the option to keep them in Outlook.
 
-Outlook `.ics` and `.csv` calendar exports are also supported when available.
+Outlook `.ics` and `.csv` calendar exports are also supported when available. CSV files are only imported when you pass
+them explicitly with `--calendar` because generic CSV files are common in Documents and Downloads.
+
+### Outlook for Windows
+
+Export the calendar as an `.ics` file:
+
+1. Open Outlook and switch to Calendar.
+2. Select the calendar you want to analyze.
+3. Use File > Save Calendar, or the calendar sharing/export option available in your Outlook version.
+4. Choose an `.ics` calendar file and save it somewhere easy to find, such as Documents.
+
+Do not export a `.PST` file for this tool. The analyzer intentionally does not read PST files because a PST export can
+include mail, contacts, tasks, and other mailbox data, not just calendar information. Use an `.ics` calendar export
+instead.
 
 Run the analyzer with the exported file:
 
 ```bash
-just run --calendar ~/Documents/your-calendar.olm
+just run --calendar ~/Documents/your-calendar.ics
+```
+
+On Windows PowerShell:
+
+```powershell
+just run --calendar "$HOME\Documents\your-calendar.ics"
 ```
 
 ## Usage
@@ -86,6 +109,21 @@ just run --days 90
 # Specify custom calendar file
 just run --calendar /path/to/your/calendar.olm
 
+# Force re-importing the newest discovered calendar and refreshing the default cache
+just run --import
+
+# Force re-importing a specific calendar and refreshing its default cache
+just run --calendar /path/to/your/calendar.olm --import
+
+# Force re-importing a specific calendar into a specific saved cache
+just run \
+  --calendar "/path/to/your/calendar.ics" \
+  --dataframe ~/.cache/calendar-analyzer/meetings.parquet \
+  --import
+
+# Use a specific saved Polars/Parquet data file
+just run --dataframe /path/to/meetings.parquet
+
 # Show top 10 meeting titles
 just run --titles 10
 
@@ -102,7 +140,20 @@ just run --exclude-title 'SVM' --exclude-title 'VMTH|State of the Hospital'
 just run --output analysis.txt
 ```
 
-The script automatically finds your most recent calendar file (unless specified), analyzes the date range, and displays or saves results.
+The script looks for saved Polars/Parquet meeting data first, analyzes the requested date range from that data when
+available, and imports a calendar export when the saved data is missing or stale. With `--calendar`, the default cache is
+created next to the calendar export, such as `calendar.olm.parquet`. Without `--calendar`, the default cache is
+`~/.cache/calendar-analyzer/meetings.parquet`.
+
+Use `--import` when you want to ignore the existing saved Polars/Parquet file and rebuild it from the calendar export.
+Without `--calendar`, `--import` discovers the newest supported calendar export and refreshes the default cache. With
+`--calendar`, it imports that specific file. Add `--dataframe` when you want the refreshed cache written to a specific
+Parquet path, such as the default `~/.cache/calendar-analyzer/meetings.parquet`.
+
+On Windows, `scripts/setup-windows.ps1` installs Git for Windows so the Bash-backed `just` recipes work from PowerShell
+too. The default cache without `--calendar` is stored under `%LOCALAPPDATA%\calendar-analyzer\meetings.parquet`. Reports
+show both the imported data coverage and the requested query date range so you can tell whether an empty or small result
+came from the query window or from the calendar export itself.
 
 ## Development
 

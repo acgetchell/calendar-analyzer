@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import re
 import sqlite3
 import sys
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
 from zoneinfo import ZoneInfo
 
-import pandas as pd
+import polars as pl
 from defusedxml import ElementTree
 from icalendar import Calendar
 
@@ -27,9 +29,20 @@ if TYPE_CHECKING:  # pragma: no cover
 PACIFIC = ZoneInfo("America/Los_Angeles")
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
 CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb", "*.olm")
+CACHE_SCHEMA_VERSION = 1
 DEFAULT_DAYS_BACK = 365
 DEFAULT_DURATION_HOURS = 1.0
 MAX_TIMED_MEETING_HOURS = 8.0
+UNSUPPORTED_CALENDAR_EXTENSIONS = {".pst"}
+MEETING_FRAME_SCHEMA = pl.Schema(
+    {
+        "start": pl.Datetime("us"),
+        "date": pl.Date,
+        "time": pl.Time,
+        "summary": pl.Utf8,
+        "duration_hours": pl.Float64,
+    }
+)
 OUTLOOK_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y")
 OUTLOOK_TIME_FORMATS = ("%I:%M %p", "%I:%M:%S %p", "%H:%M", "%H:%M:%S")
 OUTLOOK_DATETIME_FORMATS = (
@@ -42,17 +55,11 @@ OUTLOOK_DATETIME_FORMATS = (
 class Meeting(TypedDict):
     """Normalized calendar meeting data used for reporting."""
 
+    start: datetime
     date: date
     time: time
     summary: str
     duration_hours: float
-
-
-class MeetingStats(TypedDict):
-    """Aggregate meeting counters."""
-
-    total_meetings: int
-    total_hours: float
 
 
 @dataclass(frozen=True)
@@ -63,10 +70,15 @@ class SummaryOptions:
     num_times: int = 5
     period_start: datetime | None = None
     period_end: datetime | None = None
+    data_start: date | None = None
+    data_end: date | None = None
 
 
-CalendarAnalysis = tuple[list[Meeting], MeetingStats]
 SqliteCalendarRow = tuple[str | None, int, int, Any]
+
+
+class SavedDataFrameReadError(RuntimeError):
+    """Raised when a saved Polars DataFrame cannot be used for reporting."""
 
 
 def convert_to_pacific(dt: datetime) -> datetime:
@@ -80,11 +92,12 @@ def print_calendar_export_instructions() -> None:
     """Print instructions for exporting a calendar file."""
     print("\nPlease export your calendar from Calendar or Outlook:")
     print("1. Apple Calendar: select the calendar, then use File > Export")
-    print("2. Outlook for Mac: export an Outlook archive (.olm)")
-    print("3. Outlook can also be analyzed from exported ICS or CSV calendar files")
-    print("4. Save the calendar file")
+    print("2. Outlook for Mac: export an Outlook archive (.olm), or export an ICS calendar when available")
+    print("3. Outlook for Windows: export a calendar-only ICS file with File > Save Calendar")
+    print("4. Do not export a PST file; PST can include mail, contacts, tasks, and other mailbox data")
+    print("5. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
-    print("just run --calendar /path/to/your/calendar.olm")
+    print("just run --calendar /path/to/your/calendar.ics")
 
 
 def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
@@ -103,30 +116,86 @@ def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
     return latest_calendar
 
 
+def load_calendar_dataframe(
+    calendar_file: str | Path | None,
+    dataframe_path: Path,
+    *,
+    force_import: bool = False,
+) -> pl.DataFrame:
+    """Load saved calendar meetings or import and cache a calendar export."""
+    if not force_import and _cached_dataframe_is_usable(dataframe_path, calendar_file):
+        print(f"Found saved Polars DataFrame at: {dataframe_path}")
+        try:
+            frame = _read_meetings_dataframe(dataframe_path)
+        except SavedDataFrameReadError as error:
+            print(error)
+            if calendar_file is None:
+                raise_system_exit()
+            print("Saved Polars DataFrame could not be read; importing calendar export instead.")
+        else:
+            _print_frame_coverage("Saved meeting data covers", frame)
+            return frame
+
+    if force_import:
+        print("Forcing calendar import because --import was supplied.")
+    elif dataframe_path.exists():
+        print(f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}")
+    else:
+        print(f"No saved Polars DataFrame found at: {dataframe_path}")
+
+    calendar_path = get_calendar_path(calendar_file)
+    print(f"Found calendar at: {calendar_path}")
+    frame = import_calendar_dataframe(calendar_path)
+    _write_meetings_dataframe(frame, dataframe_path, calendar_path)
+    print(f"Saved Polars DataFrame to: {dataframe_path}")
+    _print_frame_coverage("Imported meeting data covers", frame)
+    return frame
+
+
 def analyze_calendar(
     calendar_path: Path,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
     days_back: int = DEFAULT_DAYS_BACK,
-) -> CalendarAnalysis:
-    """Analyze calendar events from the specified date range."""
-    if calendar_path.suffix.lower() == ".sqlitedb":
-        return analyze_sqlite_calendar(calendar_path, start_date, end_date, days_back)
-    if calendar_path.suffix.lower() == ".olm":
-        return analyze_olm_calendar(calendar_path, start_date, end_date, days_back)
-    if calendar_path.suffix.lower() == ".csv":
-        return analyze_outlook_csv_calendar(calendar_path, start_date, end_date, days_back)
-    if calendar_path.suffix.lower() == ".icbu":
+) -> pl.DataFrame:
+    """Analyze calendar events from the specified date range as a Polars DataFrame."""
+    frame = import_calendar_dataframe(calendar_path)
+    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+    return _filter_meetings_frame(frame, start_date, end_date)
+
+
+def import_calendar_dataframe(calendar_path: Path) -> pl.DataFrame:
+    """Import a calendar file into a normalized Polars DataFrame."""
+    return _meetings_dataframe(import_calendar_meetings(calendar_path))
+
+
+def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized meetings from a supported calendar export."""
+    suffix = calendar_path.suffix.lower()
+    if suffix in UNSUPPORTED_CALENDAR_EXTENSIONS:
+        print("Error: Outlook PST files are intentionally unsupported. Export a calendar-only .ics file instead.")
+        raise_system_exit()
+    if suffix == ".sqlitedb":
+        return _import_sqlite_calendar_meetings(calendar_path)
+    if suffix == ".olm":
+        return _import_olm_calendar_meetings(calendar_path)
+    if suffix == ".csv":
+        return _import_outlook_csv_calendar_meetings(calendar_path)
+    if suffix == ".icbu":
         sqlite_db_path = calendar_path / "Calendar.sqlitedb"
         if sqlite_db_path.exists():
             print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
-            return analyze_sqlite_calendar(sqlite_db_path, start_date, end_date, days_back)
+            return _import_sqlite_calendar_meetings(sqlite_db_path)
 
     ics_path = _resolve_ics_calendar_path(calendar_path)
-    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+    return _import_ics_calendar_meetings(ics_path)
+
+
+def _import_ics_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized meetings from an ICS calendar file."""
 
     try:
-        calendar = _read_ics_calendar(ics_path)
+        calendar = _read_ics_calendar(calendar_path)
     except OSError as error:
         print(f"Error reading calendar file: {error}")
         raise_system_exit()
@@ -134,37 +203,23 @@ def analyze_calendar(
         print(f"Error parsing calendar file: {error}")
         raise_system_exit()
 
-    return _analyze_ics_events(calendar, start_date, end_date)
+    return _meetings_from_ics_events(calendar)
 
 
-def analyze_sqlite_calendar(
-    calendar_path: Path,
-    start_date: datetime | None = None,
-    end_date: datetime | None = None,
-    days_back: int = DEFAULT_DAYS_BACK,
-) -> CalendarAnalysis:
-    """Analyze calendar events from a SQLite database."""
-    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
-    start_seconds = int((start_date - APPLE_EPOCH).total_seconds())
-    end_seconds = int((end_date - APPLE_EPOCH).total_seconds())
+def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized meetings from an Apple Calendar SQLite database."""
 
     try:
-        rows = _fetch_sqlite_calendar_rows(calendar_path, start_seconds, end_seconds)
+        rows = _fetch_sqlite_calendar_rows(calendar_path)
     except sqlite3.Error as error:
         print(f"Error reading SQLite calendar: {error}")
         raise_system_exit()
 
-    return _analyze_sqlite_rows(rows)
+    return _meetings_from_sqlite_rows(rows)
 
 
-def analyze_outlook_csv_calendar(
-    calendar_path: Path,
-    start_date: datetime | None = None,
-    end_date: datetime | None = None,
-    days_back: int = DEFAULT_DAYS_BACK,
-) -> CalendarAnalysis:
-    """Analyze events from an Outlook CSV calendar export."""
-    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+def _import_outlook_csv_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized meetings from an Outlook CSV calendar export."""
 
     try:
         rows = _read_outlook_csv_rows(calendar_path)
@@ -175,21 +230,15 @@ def analyze_outlook_csv_calendar(
         print(f"Error parsing Outlook CSV calendar: {error}")
         raise_system_exit()
 
-    return _analyze_outlook_csv_rows(rows, start_date, end_date)
+    return _meetings_from_outlook_csv_rows(rows)
 
 
-def analyze_olm_calendar(
-    calendar_path: Path,
-    start_date: datetime | None = None,
-    end_date: datetime | None = None,
-    days_back: int = DEFAULT_DAYS_BACK,
-) -> CalendarAnalysis:
-    """Analyze calendar appointments from an Outlook for Mac OLM archive."""
-    start_date, end_date = _resolve_date_range(start_date, end_date, days_back)
+def _import_olm_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized meetings from an Outlook for Mac OLM archive."""
 
     try:
         appointments = _read_olm_appointments(calendar_path)
-        return _analyze_olm_appointments(appointments, start_date, end_date)
+        return _meetings_from_olm_appointments(appointments)
     except (OSError, zipfile.BadZipFile) as error:
         print(f"Error reading OLM calendar: {error}")
         raise_system_exit()
@@ -199,21 +248,48 @@ def analyze_olm_calendar(
 
 
 def generate_summary(
-    meetings: list[Meeting],
-    stats: MeetingStats,
+    meetings: list[Meeting] | pl.DataFrame,
     options: SummaryOptions | None = None,
 ) -> str:
     """Generate a summary of the calendar analysis."""
-    if not meetings:
-        return "No meetings found in the specified time period."
-
+    frame = _meetings_dataframe(meetings)
     options = options or SummaryOptions()
-    df = pd.DataFrame(meetings)
-    start_date = options.period_start.date() if options.period_start is not None else df["date"].min()
-    end_date = options.period_end.date() if options.period_end is not None else df["date"].max()
-    date_range_days = max((end_date - start_date).days, 1)
-    avg_meetings_per_day = stats["total_meetings"] / date_range_days
-    avg_meeting_duration = stats["total_hours"] / stats["total_meetings"]
+    if frame.is_empty():
+        summary = ["No meetings found in the specified time period."]
+        if options.data_start is not None or options.data_end is not None:
+            summary.extend(
+                [
+                    "\nImported Data Coverage:",
+                    f"- From: {_format_summary_date(options.data_start)}",
+                    f"- To:   {_format_summary_date(options.data_end)}",
+                ]
+            )
+        if options.period_start is not None or options.period_end is not None:
+            query_start = options.period_start.date() if options.period_start is not None else None
+            query_end = options.period_end.date() if options.period_end is not None else None
+            summary.extend(
+                [
+                    "\nQuery Date Range:",
+                    f"- From: {_format_summary_date(query_start)}",
+                    f"- To:   {_format_summary_date(query_end)}",
+                ]
+            )
+        return "\n".join(summary)
+
+    query_start_date = (
+        options.period_start.date() if options.period_start is not None else frame.select(pl.col("date").min()).item()
+    )
+    query_end_date = (
+        options.period_end.date() if options.period_end is not None else frame.select(pl.col("date").max()).item()
+    )
+    data_start, data_end = _frame_date_bounds(frame)
+    imported_start_date = options.data_start or data_start
+    imported_end_date = options.data_end or data_end
+    date_range_days = max((query_end_date - query_start_date).days + 1, 1)
+    total_meetings = frame.height
+    total_hours = frame.select(pl.col("duration_hours").sum()).item()
+    avg_meetings_per_day = total_meetings / date_range_days
+    avg_meeting_duration = total_hours / total_meetings
 
     now = datetime.now(PACIFIC)
     is_dst = now.dst() != timedelta(0)
@@ -222,9 +298,12 @@ def generate_summary(
     summary = [
         f"📅 Calendar Analysis Summary (All times in Pacific Time - Currently {timezone_name})",
         "=" * 70,
-        "\nDate Range:",
-        f"- From: {start_date.strftime('%B %d, %Y')}",
-        f"- To:   {end_date.strftime('%B %d, %Y')}",
+        "\nImported Data Coverage:",
+        f"- From: {_format_summary_date(imported_start_date)}",
+        f"- To:   {_format_summary_date(imported_end_date)}",
+        "\nQuery Date Range:",
+        f"- From: {query_start_date.strftime('%B %d, %Y')}",
+        f"- To:   {query_end_date.strftime('%B %d, %Y')}",
         f"- Span: {date_range_days} days",
         "\nTimezone Information:",
         f"- Currently using {timezone_name} (Pacific {'Daylight' if is_dst else 'Standard'} Time)",
@@ -232,21 +311,33 @@ def generate_summary(
         "- Meetings during DST periods are shown in PDT",
         "- Meetings during standard time are shown in PST",
         "\nMeeting Statistics:",
-        f"- Total Meetings: {stats['total_meetings']}",
-        f"- Total Meeting Hours: {stats['total_hours']:.1f}",
+        f"- Total Meetings: {total_meetings}",
+        f"- Total Meeting Hours: {total_hours:.1f}",
         f"- Average Meetings per Day: {avg_meetings_per_day:.1f}",
         f"- Average Meeting Duration: {avg_meeting_duration:.1f} hours",
         f"\nTop {options.num_times} Most Common Meeting Times ({timezone_name}):",
     ]
 
-    time_counts = df["time"].value_counts().head(options.num_times)
+    time_counts = (
+        frame.group_by("time")
+        .len(name="count")
+        .sort(["count", "time"], descending=[True, False])
+        .head(options.num_times)
+    )
     summary.extend(
-        f"- {meeting_time.strftime('%I:%M %p')}: {count} meetings" for meeting_time, count in time_counts.items()
+        f"- {row['time'].strftime('%I:%M %p')}: {row['count']} meetings" for row in time_counts.iter_rows(named=True)
     )
     summary.extend([f"\nTop {options.num_titles} Most Frequent Meeting Titles:", "-" * 30])
 
-    title_counts = df["summary"].value_counts().head(options.num_titles)
-    for title, count in title_counts.items():
+    title_counts = (
+        frame.group_by("summary")
+        .len(name="count")
+        .sort(["count", "summary"], descending=[True, False])
+        .head(options.num_titles)
+    )
+    for row in title_counts.iter_rows(named=True):
+        title = row["summary"]
+        count = row["count"]
         display_title = f"{title[:100]}..." if len(title) > 100 else title
         summary.append(f"{count:4d} | {display_title}")
 
@@ -261,21 +352,26 @@ def main() -> None:
     _validate_date_range(requested_start_date, requested_end_date)
     excluded_title_patterns = _compile_title_exclusion_patterns(args.exclude_titles)
     start_date, end_date = _resolve_date_range(requested_start_date, requested_end_date, args.days)
+    dataframe_path = _resolve_dataframe_path(args.dataframe, args.calendar)
 
     print("📊 Analyzing your calendar...")
-    calendar_path = get_calendar_path(args.calendar)
-    print(f"Found calendar at: {calendar_path}")
-
-    meetings, stats = analyze_calendar(calendar_path, start_date, end_date, args.days)
-    meetings, stats = _exclude_title_matches(meetings, excluded_title_patterns)
+    meetings_frame = load_calendar_dataframe(
+        args.calendar,
+        dataframe_path,
+        force_import=args.force_import,
+    )
+    data_start, data_end = _frame_date_bounds(meetings_frame)
+    meetings_frame = _filter_meetings_frame(meetings_frame, start_date, end_date)
+    meetings_frame = _exclude_title_matches_frame(meetings_frame, excluded_title_patterns)
     summary = generate_summary(
-        meetings,
-        stats,
-        SummaryOptions(
+        meetings_frame,
+        options=SummaryOptions(
             num_titles=args.titles,
             num_times=args.times,
             period_start=start_date,
             period_end=end_date,
+            data_start=data_start,
+            data_end=data_end,
         ),
     )
     _write_or_print_summary(summary, args.output)
@@ -304,6 +400,111 @@ def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
                 print(f"  - {item.name}")
 
     return calendar_path
+
+
+def _resolve_dataframe_path(dataframe_file: str | Path | None, calendar_file: str | Path | None) -> Path:
+    """Return the saved Polars DataFrame path for this run."""
+    if dataframe_file is not None:
+        return Path(dataframe_file).expanduser().resolve()
+
+    if calendar_file is not None:
+        calendar_path = Path(calendar_file).expanduser()
+        if calendar_path.suffix:
+            return calendar_path.with_suffix(f"{calendar_path.suffix}.parquet").resolve()
+        return calendar_path.with_suffix(".parquet").resolve()
+
+    return (_user_cache_directory() / "meetings.parquet").resolve()
+
+
+def _user_cache_directory() -> Path:
+    """Return a platform-appropriate cache directory for saved meeting data."""
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "calendar-analyzer"
+        return Path.home() / "AppData" / "Local" / "calendar-analyzer"
+
+    return Path.home() / ".cache" / "calendar-analyzer"
+
+
+def _cached_dataframe_is_usable(dataframe_path: Path, calendar_file: str | Path | None) -> bool:
+    """Return whether an existing saved DataFrame can satisfy this run."""
+    if not dataframe_path.exists():
+        return False
+
+    metadata = _read_cache_metadata(dataframe_path)
+    if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:
+        return False
+
+    if calendar_file is None:
+        return True
+
+    try:
+        calendar_path = _resolve_calendar_source_path(Path(calendar_file))
+    except OSError:
+        return False
+
+    return _metadata_matches_calendar(metadata, calendar_path)
+
+
+def _metadata_matches_calendar(metadata: dict[str, object], calendar_path: Path) -> bool:
+    """Return whether saved DataFrame metadata matches a requested calendar source."""
+    try:
+        source_path = _resolve_calendar_source_path(calendar_path)
+    except OSError:
+        return False
+
+    if metadata.get("source_path") != str(source_path):
+        return False
+
+    try:
+        source_stat = source_path.stat()
+    except OSError:
+        return False
+
+    return (
+        metadata.get("source_mtime_ns") == source_stat.st_mtime_ns
+        and metadata.get("source_size") == source_stat.st_size
+    )
+
+
+def _read_cache_metadata(dataframe_path: Path) -> dict[str, object]:
+    """Read saved DataFrame sidecar metadata, returning an empty mapping when absent."""
+    metadata_path = _cache_metadata_path(dataframe_path)
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _cache_metadata_path(dataframe_path: Path) -> Path:
+    """Return the metadata sidecar path for a saved DataFrame."""
+    return dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+
+
+def _print_frame_coverage(label: str, frame: pl.DataFrame) -> None:
+    """Print the date coverage for imported or loaded meeting data."""
+    start_date, end_date = _frame_date_bounds(frame)
+    if start_date is None or end_date is None:
+        print(f"{label}: no timed meetings")
+        return
+
+    print(f"{label}: {_format_summary_date(start_date)} to {_format_summary_date(end_date)}")
+
+
+def _frame_date_bounds(frame: pl.DataFrame) -> tuple[date | None, date | None]:
+    """Return the min and max dates covered by a normalized meeting DataFrame."""
+    if frame.is_empty():
+        return None, None
+    bounds = frame.select(pl.col("date").min().alias("start"), pl.col("date").max().alias("end")).row(0, named=True)
+    return bounds["start"], bounds["end"]
+
+
+def _format_summary_date(value: date | None) -> str:
+    """Format an optional date for user-facing coverage output."""
+    if value is None:
+        return "No timed meetings"
+    return value.strftime("%B %d, %Y")
 
 
 def _candidate_calendar_directories(home: Path) -> list[Path]:
@@ -373,6 +574,23 @@ def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
     return raise_system_exit()
 
 
+def _resolve_calendar_source_path(calendar_path: Path) -> Path:
+    """Return the concrete filesystem source used to import a calendar."""
+    resolved_path = calendar_path.expanduser().resolve()
+    if resolved_path.suffix.lower() != ".icbu":
+        return resolved_path
+
+    sqlite_db_path = resolved_path / "Calendar.sqlitedb"
+    if sqlite_db_path.exists():
+        return sqlite_db_path.resolve()
+
+    ics_files = sorted(resolved_path.glob("*.ics"))
+    if ics_files:
+        return ics_files[0].resolve()
+
+    return resolved_path
+
+
 def _print_directory_contents(directory: Path, heading: str) -> None:
     """Print directory contents for diagnostics without failing on listing errors."""
     print(heading)
@@ -400,13 +618,12 @@ def _read_ics_calendar(calendar_path: Path) -> Calendar:
         return Calendar.from_ical(calendar_file.read())
 
 
-def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: datetime) -> CalendarAnalysis:
-    """Collect meetings and aggregate stats from VEVENT entries in a date range."""
+def _meetings_from_ics_events(calendar: Calendar) -> list[Meeting]:
+    """Collect normalized meetings from VEVENT entries."""
     meetings: list[Meeting] = []
-    stats = _empty_stats()
 
     for event in calendar.walk("VEVENT"):
-        if _event_is_transparent(event):
+        if _event_is_transparent(event) or _event_is_marked_all_day(event) or _event_is_non_meeting_status(event):
             continue
 
         raw_start = _event_start_datetime(event)
@@ -414,18 +631,18 @@ def _analyze_ics_events(calendar: Calendar, start_date: datetime, end_date: date
             continue
 
         start = convert_to_pacific(raw_start)
-        if not start_date <= start <= end_date:
-            continue
-
         duration_hours = _event_duration_hours(event, start)
-        if _is_all_day_like_calendar_block(start, duration_hours) or _is_floating_midnight(raw_start):
+        if (
+            _is_all_day_like_calendar_block(start, duration_hours)
+            or _is_floating_midnight(raw_start)
+            or _is_default_duration_source_midnight(event, raw_start)
+        ):
             continue
 
         meeting = _meeting_from_event(event, start, duration_hours)
         meetings.append(meeting)
-        _update_stats(stats, duration_hours)
 
-    return meetings, stats
+    return meetings
 
 
 def _event_start_datetime(event: Any) -> datetime | None:
@@ -440,6 +657,38 @@ def _event_is_transparent(event: Any) -> bool:
     """Return whether a VEVENT is marked free/transparent."""
     transparency = event.get("transp")
     return str(transparency or "").strip().upper() == "TRANSPARENT"
+
+
+def _event_is_non_meeting_status(event: Any) -> bool:
+    """Return whether Microsoft ICS metadata marks an event as non-meeting time."""
+    return any(
+        _is_non_meeting_free_busy(event.get(property_name))
+        for property_name in (
+            "X-MICROSOFT-CDO-BUSYSTATUS",
+            "X-MICROSOFT-CDO-INTENDEDSTATUS",
+        )
+    )
+
+
+def _event_is_marked_all_day(event: Any) -> bool:
+    """Return whether a VEVENT has vendor metadata marking it all-day."""
+    return _event_has_truthy_property(
+        event,
+        (
+            "X-MICROSOFT-CDO-ALLDAYEVENT",
+            "X-MICROSOFT-MSNCALENDAR-ALLDAYEVENT",
+        ),
+    )
+
+
+def _event_has_truthy_property(event: Any, property_names: tuple[str, ...]) -> bool:
+    """Return whether any event property has a true-like value."""
+    return any(_ics_truthy(event.get(property_name)) for property_name in property_names)
+
+
+def _ics_truthy(value: object) -> bool:
+    """Return whether an ICS property value is true-like."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _event_duration_hours(event: Any, start: datetime) -> float:
@@ -485,9 +734,24 @@ def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
     return _positive_duration_hours(start, end_dt)
 
 
+def _is_default_duration_source_midnight(event: Any, raw_start: datetime) -> bool:
+    """Return whether an event looks like an all-day export downgraded to a default one-hour meeting."""
+    return _starts_at_midnight(raw_start) and not _event_has_explicit_timed_duration(event)
+
+
+def _event_has_explicit_timed_duration(event: Any) -> bool:
+    """Return whether an ICS event has an explicit timed duration or end."""
+    if event.get("duration") is not None:
+        return True
+
+    end = event.get("dtend")
+    return end is not None and isinstance(end.dt, datetime)
+
+
 def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> Meeting:
     """Normalize a VEVENT into the meeting shape used by reporting."""
     return {
+        "start": start,
         "date": start.date(),
         "time": start.time(),
         "summary": str(event.get("summary", "No Title")),
@@ -497,10 +761,10 @@ def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> M
 
 def _fetch_sqlite_calendar_rows(
     calendar_path: Path,
-    start_seconds: int,
-    end_seconds: int,
+    start_seconds: int | None = None,
+    end_seconds: int | None = None,
 ) -> list[SqliteCalendarRow]:
-    """Fetch SQLite calendar rows in the Apple-epoch date range."""
+    """Fetch SQLite calendar rows, optionally in an Apple-epoch date range."""
     with closing(sqlite3.connect(calendar_path)) as conn:
         cursor = conn.cursor()
         all_day_column = _sqlite_all_day_column(cursor)
@@ -513,10 +777,13 @@ def _fetch_sqlite_calendar_rows(
                 end_date,
                 {all_day_expression}
             FROM CalendarItem
-            WHERE start_date >= ? AND start_date <= ?
-            ORDER BY start_date, summary
             """  # noqa: S608
-        cursor.execute(query, (start_seconds, end_seconds))
+        parameters: tuple[int, int] | tuple[()] = ()
+        if start_seconds is not None and end_seconds is not None:
+            query += " WHERE start_date >= ? AND start_date <= ?"
+            parameters = (start_seconds, end_seconds)
+        query += " ORDER BY start_date, summary"
+        cursor.execute(query, parameters)
         return cursor.fetchall()
 
 
@@ -535,10 +802,9 @@ def _quote_sqlite_identifier(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
 
-def _analyze_sqlite_rows(rows: Iterable[SqliteCalendarRow]) -> CalendarAnalysis:
-    """Normalize SQLite calendar rows and aggregate meeting stats."""
+def _meetings_from_sqlite_rows(rows: Iterable[SqliteCalendarRow]) -> list[Meeting]:
+    """Normalize SQLite calendar rows."""
     meetings: list[Meeting] = []
-    stats = _empty_stats()
 
     for summary, start_seconds, end_seconds, is_all_day in rows:
         if _csv_truthy(str(is_all_day)):
@@ -552,15 +818,15 @@ def _analyze_sqlite_rows(rows: Iterable[SqliteCalendarRow]) -> CalendarAnalysis:
 
         meetings.append(
             {
+                "start": start_dt,
                 "date": start_dt.date(),
                 "time": start_dt.time(),
                 "summary": summary or "No Title",
                 "duration_hours": duration_hours,
             }
         )
-        _update_stats(stats, duration_hours)
 
-    return meetings, stats
+    return meetings
 
 
 def _read_olm_appointments(calendar_path: Path) -> list[Element]:
@@ -591,14 +857,9 @@ def _olm_xml_appointments(root: Element) -> list[Element]:
     return [element for element in root.iter() if _xml_local_name(element.tag) == "appointment"]
 
 
-def _analyze_olm_appointments(
-    appointments: Iterable[Element],
-    start_date: datetime,
-    end_date: datetime,
-) -> CalendarAnalysis:
-    """Normalize OLM appointment XML and aggregate meeting stats."""
+def _meetings_from_olm_appointments(appointments: Iterable[Element]) -> list[Meeting]:
+    """Normalize OLM appointment XML."""
     meetings: list[Meeting] = []
-    stats = _empty_stats()
     dated_appointments = 0
     unparsable_start_values: list[str] = []
 
@@ -617,35 +878,32 @@ def _analyze_olm_appointments(
             continue
 
         start = convert_to_pacific(start)
-        if not start_date <= start <= end_date:
-            continue
-
         end = _olm_appointment_end(appointment, start)
         duration_hours = _positive_duration_hours(start, end)
-        if _is_all_day_like_calendar_block(start, duration_hours):
+        if _is_all_day_like_calendar_block(start, duration_hours) or _is_olm_source_midnight(appointment):
             continue
 
         meetings.append(
             {
+                "start": start,
                 "date": start.date(),
                 "time": start.time(),
                 "summary": _xml_text(appointment, ("OPFCalendarEventCopySummary", "Subject", "Summary")) or "No Title",
                 "duration_hours": duration_hours,
             }
         )
-        _update_stats(stats, duration_hours)
 
     if dated_appointments and dated_appointments == len(unparsable_start_values):
         examples = ", ".join(unparsable_start_values[:3])
         msg = f"Could not parse any OLM appointment start dates. Example value(s): {examples}"
         raise ValueError(msg)
 
-    return meetings, stats
+    return meetings
 
 
 def _olm_appointment_start(appointment: Element) -> datetime | None:
     """Return the start datetime from an OLM appointment."""
-    start = _outlook_datetime(_olm_appointment_start_text(appointment), require_time=True)
+    start = _olm_datetime(_olm_appointment_start_text(appointment), require_time=True)
     return start or _outlook_xml_split_datetime(
         appointment,
         ("OPFCalendarEventCopyStartDate", "StartDate"),
@@ -684,8 +942,8 @@ def _olm_appointment_is_all_day(appointment: Element) -> bool:
 
 
 def _olm_appointment_is_free(appointment: Element) -> bool:
-    """Return whether an OLM appointment is marked free on the calendar."""
-    return _is_free_busy_free(_xml_text(appointment, ("OPFCalendarEventCopyFreeBusyStatus", "FreeBusyStatus")))
+    """Return whether an OLM appointment is marked as non-meeting time."""
+    return _is_non_meeting_free_busy(_xml_text(appointment, ("OPFCalendarEventCopyFreeBusyStatus", "FreeBusyStatus")))
 
 
 def _olm_appointment_date_text(appointment: Element) -> str | None:
@@ -695,7 +953,7 @@ def _olm_appointment_date_text(appointment: Element) -> str | None:
 
 def _olm_appointment_end(appointment: Element, start: datetime) -> datetime:
     """Return the end datetime from an OLM appointment."""
-    end = _outlook_datetime(_olm_appointment_end_text(appointment)) or _outlook_xml_split_datetime(
+    end = _olm_datetime(_olm_appointment_end_text(appointment)) or _outlook_xml_split_datetime(
         appointment,
         ("OPFCalendarEventCopyEndDate", "EndDate"),
         ("OPFCalendarEventCopyEndTime", "EndTime"),
@@ -707,6 +965,55 @@ def _olm_appointment_end(appointment: Element, start: datetime) -> datetime:
 def _olm_appointment_end_text(appointment: Element) -> str | None:
     """Return the raw OLM appointment end value."""
     return _xml_text(appointment, ("OPFCalendarEventCopyEndTime", "EndTime"))
+
+
+def _is_olm_source_midnight(appointment: Element) -> bool:
+    """Return whether an OLM appointment starts at source midnight."""
+    return _olm_appointment_start_text_is_midnight(appointment)
+
+
+def _olm_appointment_start_text_is_midnight(appointment: Element) -> bool:
+    """Return whether the raw OLM start text has a midnight time component."""
+    start_text = _olm_appointment_start_text(appointment)
+    return start_text is not None and _datetime_text_starts_at_midnight(start_text)
+
+
+def _datetime_text_starts_at_midnight(value: str) -> bool:
+    """Return whether a date/time text contains a source midnight time."""
+    text = value.strip().lower()
+    return (
+        text in {"00:00", "00:00:00", "12:00 am", "12:00:00 am"}
+        or bool(re.search(r"(?:t|\s)00:00(?::00)?(?:z|[+-]\d{2}:?\d{2})?$", text))
+        or bool(re.search(r"\s12:00(?::00)?\s*am$", text))
+    )
+
+
+def _olm_datetime(value: str | None, *, require_time: bool = False) -> datetime | None:
+    """Parse an OLM date/time value, treating combined ISO values as UTC."""
+    if value is None or not value.strip():
+        return None
+
+    text = value.strip()
+    if "T" in text:
+        parsed = _parse_olm_iso_datetime(text)
+        if parsed is not None:
+            return parsed
+        if require_time and not _outlook_text_has_time(text):
+            return None
+
+    return _outlook_datetime(value, require_time=require_time)
+
+
+def _parse_olm_iso_datetime(text: str) -> datetime | None:
+    """Parse an OLM ISO datetime, assuming missing timezone data means UTC."""
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _xml_text(element: Element, field_names: tuple[str, ...]) -> str | None:
@@ -758,14 +1065,9 @@ def _validate_outlook_csv_headers(fieldnames: Iterable[str]) -> None:
         raise ValueError(msg)
 
 
-def _analyze_outlook_csv_rows(
-    rows: Iterable[dict[str, str]],
-    start_date: datetime,
-    end_date: datetime,
-) -> CalendarAnalysis:
-    """Normalize Outlook CSV rows and aggregate meeting stats."""
+def _meetings_from_outlook_csv_rows(rows: Iterable[dict[str, str]]) -> list[Meeting]:
+    """Normalize Outlook CSV rows."""
     meetings: list[Meeting] = []
-    stats = _empty_stats()
 
     for row in rows:
         start = _outlook_csv_start_datetime(row)
@@ -773,9 +1075,6 @@ def _analyze_outlook_csv_rows(
             continue
 
         start = convert_to_pacific(start)
-        if not start_date <= start <= end_date:
-            continue
-
         end = _outlook_csv_end_datetime(row, start)
         duration_hours = _positive_duration_hours(start, end)
         if _is_all_day_like_calendar_block(start, duration_hours):
@@ -783,22 +1082,22 @@ def _analyze_outlook_csv_rows(
 
         meetings.append(
             {
+                "start": start,
                 "date": start.date(),
                 "time": start.time(),
                 "summary": _csv_value(row, ("Subject", "Title", "Summary")) or "No Title",
                 "duration_hours": duration_hours,
             }
         )
-        _update_stats(stats, duration_hours)
 
-    return meetings, stats
+    return meetings
 
 
 def _outlook_csv_start_datetime(row: dict[str, str]) -> datetime | None:
     """Return the row start datetime, skipping all-day rows."""
     if _csv_truthy(_csv_value(row, ("All day event", "All Day Event", "All Day", "AllDayEvent"))):
         return None
-    if _is_free_busy_free(_csv_value(row, ("Show Time As", "Show As", "Busy Status", "FreeBusyStatus"))):
+    if _is_non_meeting_free_busy(_csv_value(row, ("Show Time As", "Show As", "Busy Status", "FreeBusyStatus"))):
         return None
 
     return _outlook_split_datetime(row, ("Start Date", "StartDate"), ("Start Time", "StartTime")) or _outlook_datetime(
@@ -971,14 +1270,131 @@ def _csv_truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "y"}
 
 
-def _is_free_busy_free(value: str | None) -> bool:
-    """Return whether a free/busy value marks the item as free time."""
-    return value is not None and value.strip().lower() in {"0", "free", "transparent"}
+def _is_non_meeting_free_busy(value: object) -> bool:
+    """Return whether a free/busy value marks an item as non-meeting time."""
+    if value is None:
+        return False
+
+    text = str(value).strip().lower()
+    normalized_text = _normalize_csv_field(text)
+    return text in {"0", "3"} or normalized_text in {"free", "transparent", "oof", "outofoffice"}
 
 
-def _empty_stats() -> MeetingStats:
-    """Create an empty meeting statistics accumulator."""
-    return {"total_meetings": 0, "total_hours": 0.0}
+def _meetings_dataframe(meetings: list[Meeting] | pl.DataFrame) -> pl.DataFrame:
+    """Return normalized meetings as a Polars DataFrame with the reporting schema."""
+    if isinstance(meetings, pl.DataFrame):
+        return meetings.select(list(MEETING_FRAME_SCHEMA)).cast(MEETING_FRAME_SCHEMA)
+
+    rows = [
+        {
+            "start": _meeting_local_start(meeting),
+            "date": meeting["date"],
+            "time": meeting["time"],
+            "summary": meeting["summary"],
+            "duration_hours": float(meeting["duration_hours"]),
+        }
+        for meeting in meetings
+    ]
+    if not rows:
+        return pl.DataFrame(schema=MEETING_FRAME_SCHEMA)
+    return pl.DataFrame(rows, schema=MEETING_FRAME_SCHEMA, orient="row")
+
+
+def _meeting_local_start(meeting: Meeting) -> datetime:
+    """Return a Pacific local naive datetime for cache filtering."""
+    return _local_naive_datetime(meeting["start"])
+
+
+def _local_naive_datetime(value: datetime) -> datetime:
+    """Return a timezone-free Pacific local datetime for Polars comparisons."""
+    return convert_to_pacific(value).replace(tzinfo=None)
+
+
+def _filter_meetings_frame(frame: pl.DataFrame, start_date: datetime, end_date: datetime) -> pl.DataFrame:
+    """Filter normalized meetings to an inclusive datetime window."""
+    if frame.is_empty():
+        return frame
+
+    return frame.filter(
+        (pl.col("start") >= _local_naive_datetime(start_date)) & (pl.col("start") <= _local_naive_datetime(end_date))
+    )
+
+
+def _read_meetings_dataframe(dataframe_path: Path) -> pl.DataFrame:
+    """Read normalized meetings from a saved Polars/Parquet DataFrame."""
+    try:
+        frame = pl.read_parquet(dataframe_path)
+    except (OSError, pl.exceptions.PolarsError) as error:
+        raise SavedDataFrameReadError(f"Error reading saved Polars DataFrame: {error}") from error
+
+    missing_columns = set(MEETING_FRAME_SCHEMA) - set(frame.columns)
+    if missing_columns:
+        raise SavedDataFrameReadError(
+            f"Error reading saved Polars DataFrame: missing columns {sorted(missing_columns)}"
+        )
+
+    return _meetings_dataframe(frame)
+
+
+def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calendar_path: Path) -> None:
+    """Write normalized meetings and source metadata to disk."""
+    parquet_temp_path: Path | None = None
+    metadata_temp_path: Path | None = None
+    try:
+        dataframe_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path = _cache_metadata_path(dataframe_path)
+        parquet_temp_path = _temporary_sibling_path(dataframe_path)
+        metadata_temp_path = _temporary_sibling_path(metadata_path)
+
+        frame.write_parquet(parquet_temp_path)
+        metadata_temp_path.write_text(_cache_metadata(calendar_path, frame), encoding="utf-8")
+        parquet_temp_path.replace(dataframe_path)
+        parquet_temp_path = None
+        metadata_temp_path.replace(metadata_path)
+        metadata_temp_path = None
+    except (OSError, pl.exceptions.PolarsError) as error:
+        print(f"Error saving Polars DataFrame: {error}")
+        raise_system_exit()
+    finally:
+        for temp_path in (parquet_temp_path, metadata_temp_path):
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
+
+
+def _temporary_sibling_path(destination: Path) -> Path:
+    """Return an empty temporary path in the same directory as the destination."""
+    file_descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    os.close(file_descriptor)
+    return Path(temp_name)
+
+
+def _cache_metadata(calendar_path: Path, frame: pl.DataFrame) -> str:
+    """Return JSON sidecar metadata for a saved DataFrame."""
+    try:
+        source_path = _resolve_calendar_source_path(calendar_path)
+        source_stat = source_path.stat()
+    except OSError:
+        source_path = calendar_path
+        source_mtime_ns = None
+        source_size = None
+    else:
+        source_mtime_ns = source_stat.st_mtime_ns
+        source_size = source_stat.st_size
+
+    data_start, data_end = _frame_date_bounds(frame)
+    metadata = {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "source_path": str(source_path),
+        "source_mtime_ns": source_mtime_ns,
+        "source_size": source_size,
+        "data_start": data_start.isoformat() if data_start is not None else None,
+        "data_end": data_end.isoformat() if data_end is not None else None,
+    }
+    return json.dumps(metadata, indent=2, sort_keys=True)
 
 
 def _compile_title_exclusion_patterns(patterns: list[str] | None) -> list[re.Pattern[str]]:
@@ -993,40 +1409,40 @@ def _compile_title_exclusion_patterns(patterns: list[str] | None) -> list[re.Pat
     return compiled_patterns
 
 
-def _exclude_title_matches(
-    meetings: list[Meeting],
+def _exclude_title_matches_frame(
+    frame: pl.DataFrame,
     excluded_title_patterns: list[re.Pattern[str]],
-) -> CalendarAnalysis:
+) -> pl.DataFrame:
     """Remove meetings whose titles match any excluded title regex."""
-    if not excluded_title_patterns:
-        return meetings, _stats_from_meetings(meetings)
+    if not excluded_title_patterns or frame.is_empty():
+        return frame
 
-    filtered_meetings = [
-        meeting
-        for meeting in meetings
-        if not any(pattern.search(meeting["summary"]) for pattern in excluded_title_patterns)
+    rows = [
+        row
+        for row in frame.iter_rows(named=True)
+        if not any(pattern.search(row["summary"]) for pattern in excluded_title_patterns)
     ]
-    return filtered_meetings, _stats_from_meetings(filtered_meetings)
-
-
-def _stats_from_meetings(meetings: list[Meeting]) -> MeetingStats:
-    """Build aggregate statistics from normalized meetings."""
-    return {
-        "total_meetings": len(meetings),
-        "total_hours": sum(meeting["duration_hours"] for meeting in meetings),
-    }
-
-
-def _update_stats(stats: MeetingStats, duration_hours: float) -> None:
-    """Add one meeting and its duration to the statistics accumulator."""
-    stats["total_meetings"] += 1
-    stats["total_hours"] += duration_hours
+    return (
+        pl.DataFrame(rows, schema=MEETING_FRAME_SCHEMA, orient="row")
+        if rows
+        else pl.DataFrame(schema=MEETING_FRAME_SCHEMA)
+    )
 
 
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the calendar analyzer CLI."""
     parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
     parser.add_argument("--calendar", help="Path to the exported calendar file (.ics, .olm, .csv, .icbu, .sqlitedb)")
+    parser.add_argument(
+        "--dataframe",
+        help="Path to the saved Polars/Parquet meeting data (default: derived from --calendar or user cache)",
+    )
+    parser.add_argument(
+        "--import",
+        action="store_true",
+        dest="force_import",
+        help="Import the calendar export and refresh the saved Polars DataFrame even when cached data exists",
+    )
     parser.add_argument("--start-date", help="Start date for analysis (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date for analysis (YYYY-MM-DD)")
     parser.add_argument(
