@@ -301,7 +301,9 @@ def test_start_date_rejects_non_extended_iso_formats(monkeypatch, capsys, start_
     Path(dummy_path).unlink()
 
 
-@pytest.mark.parametrize(("option", "value"), [("--days", "0"), ("--times", "-1"), ("--titles", "0")])
+@pytest.mark.parametrize(
+    ("option", "value"), [("--days", "0"), ("--times", "-1"), ("--titles", "0"), ("--days", "abc")]
+)
 def test_positive_integer_arguments_reject_non_positive_values(monkeypatch, capsys, option: str, value: str) -> None:
     """Test count and range arguments must be positive integers."""
     monkeypatch.setattr("sys.argv", ["calendar-analyzer", option, value])
@@ -473,6 +475,24 @@ def test_generate_summary_no_meetings() -> None:
     """Test generate_summary with no meetings."""
     result = calendar_analyzer.generate_summary(meeting_frame([]))
     assert result == "No meetings found in the specified time period."
+
+
+def test_generate_summary_no_meetings_shows_optional_ranges() -> None:
+    """Test empty summaries still show requested coverage and query bounds."""
+    result = calendar_analyzer.generate_summary(
+        meeting_frame([]),
+        calendar_analyzer.SummaryOptions(
+            data_end=datetime(2023, 12, 31, tzinfo=calendar_analyzer.PACIFIC).date(),
+            period_end=datetime(2023, 7, 31, tzinfo=calendar_analyzer.PACIFIC),
+        ),
+    )
+
+    assert "No meetings found in the specified time period." in result
+    assert "Imported Data Coverage:" in result
+    assert "- From: No timed meetings" in result
+    assert "- To:   December 31, 2023" in result
+    assert "Query Date Range:" in result
+    assert "- To:   July 31, 2023" in result
 
 
 def test_file_output_functionality(monkeypatch, capsys) -> None:
@@ -967,6 +987,59 @@ def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatc
     assert [row["summary"] for row in rows] == ["Original Cache"]
 
 
+def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path: Path) -> None:
+    """Test cached DataFrames are rebuilt when sidecar metadata is unusable."""
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_path = tmp_path / "calendar.ics"
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    meeting_frame([]).write_parquet(dataframe_path)
+    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+
+    metadata_path.write_text("{not json", encoding="utf-8")
+    assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
+
+    metadata_path.write_text(json.dumps({"schema_version": 0}), encoding="utf-8")
+    assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
+
+    source_stat = calendar_path.stat()
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": calendar_analyzer.CACHE_SCHEMA_VERSION,
+                "source_path": str(calendar_path.resolve()),
+                "source_mtime_ns": source_stat.st_mtime_ns,
+                "source_size": source_stat.st_size + 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
+
+
+def test_cache_metadata_handles_unstatable_calendar_source(monkeypatch, tmp_path: Path) -> None:
+    """Test cache metadata records unknown source stats when stat fails."""
+    calendar_path = tmp_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+
+    def raise_source_error(_calendar_path: Path) -> Path:
+        message = "source vanished"
+        raise OSError(message)
+
+    monkeypatch.setattr("calendar_analyzer._resolve_calendar_source_path", raise_source_error)
+
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert metadata["source_path"] == str(calendar_path)
+    assert metadata["source_mtime_ns"] is None
+    assert metadata["source_size"] is None
+
+
 def test_main_supports_text_only_stdout(monkeypatch) -> None:
     """Test summary output works when stdout has no binary buffer."""
     ics_content = textwrap.dedent("""
@@ -1088,6 +1161,35 @@ def test_analyze_calendar_with_different_duration_formats() -> None:
 
     # Clean up
     Path(tmp_path).unlink()
+
+
+def test_ics_explicit_duration_marks_midnight_event_as_timed() -> None:
+    """Test midnight ICS events with explicit durations are treated as timed."""
+    ics_content = textwrap.dedent("""
+    BEGIN:VCALENDAR
+    VERSION:2.0
+    BEGIN:VEVENT
+    DTSTART:20230701T000000Z
+    DURATION:PT2H
+    SUMMARY:Midnight Timed Meeting
+    END:VEVENT
+    END:VCALENDAR
+    """)
+    tmp_path = create_temp_ics_file(ics_content)
+
+    try:
+        meetings, stats = analysis_result(
+            calendar_analyzer.analyze_calendar(
+                Path(tmp_path),
+                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+            )
+        )
+    finally:
+        Path(tmp_path).unlink()
+
+    assert stats == {"total_meetings": 1, "total_hours": 2.0}
+    assert [meeting["summary"] for meeting in meetings] == ["Midnight Timed Meeting"]
 
 
 def test_generate_summary_with_long_titles() -> None:
@@ -2162,6 +2264,54 @@ def test_analyze_calendar_skips_outlook_csv_combined_date_only_start() -> None:
 
     assert stats == {"total_meetings": 1, "total_hours": 1.0}
     assert [meeting["summary"] for meeting in meetings] == ["CSV Combined Timed"]
+
+
+def test_analyze_calendar_outlook_csv_parses_iso_datetime_variants(tmp_path: Path) -> None:
+    """Test Outlook CSV parsing accepts naive and timezone-aware ISO datetimes."""
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(
+        textwrap.dedent("""\
+        Subject,Start,End
+        Naive ISO,2023-07-01T10:30:00,2023-07-01T11:30:00
+        UTC ISO,2023-07-01T17:30:00+00:00,2023-07-01T18:30:00+00:00
+        """),
+        encoding="utf-8",
+    )
+
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            csv_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+    )
+
+    assert stats == {"total_meetings": 2, "total_hours": 2.0}
+    assert [meeting["summary"] for meeting in meetings] == ["Naive ISO", "UTC ISO"]
+    assert [meeting["time"].hour for meeting in meetings] == [10, 10]
+
+
+def test_analyze_calendar_outlook_csv_defaults_malformed_split_end(tmp_path: Path) -> None:
+    """Test malformed split end columns fall back to the default duration."""
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(
+        textwrap.dedent("""\
+        Subject,Start Date,Start Time,End Date,End Time
+        Default End,07/01/2023,10:00 AM,not-a-date,
+        """),
+        encoding="utf-8",
+    )
+
+    meetings, stats = analysis_result(
+        calendar_analyzer.analyze_calendar(
+            csv_path,
+            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+        )
+    )
+
+    assert stats == {"total_meetings": 1, "total_hours": 1.0}
+    assert [meeting["summary"] for meeting in meetings] == ["Default End"]
 
 
 def test_analyze_calendar_defaults_missing_sqlite_summary() -> None:

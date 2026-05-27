@@ -2,12 +2,12 @@
 name = "calendar-analyzer"
 version = "0.1.0"
 authors = [{ name = "Adam Getchell", email = "adam@adamgetchell.org" }]
-license = { text = "MIT" }
+license = { text = "BSD-3-Clause" }
 keywords = ["calendar", "analysis", "productivity", "meeting-summary"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: BSD License",
   "Operating System :: OS Independent",
 ]
 description = "A Python script that analyzes your Apple Calendar data and provides a summary of your meetings"
