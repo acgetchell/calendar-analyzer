@@ -1,6 +1,7 @@
 """Tests for calendar_analyzer module."""
 
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -710,6 +711,84 @@ def test_main_import_option_refreshes_saved_dataframe(monkeypatch, capsys, tmp_p
     assert "Stale Cached Meeting" not in out
 
 
+def test_load_calendar_dataframe_tracks_icbu_inner_ics_metadata(capsys, tmp_path: Path) -> None:
+    """Test ICBU cache validity follows the embedded calendar file."""
+    icbu_path = tmp_path / "backup.icbu"
+    icbu_path.mkdir()
+    ics_path = icbu_path / "calendar.ics"
+    dataframe_path = tmp_path / "meetings.parquet"
+    ics_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Stale Inner Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path, force_import=True)
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["source_path"] == str(ics_path.resolve())
+    capsys.readouterr()
+
+    ics_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Imported Inner Meeting With New Size
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+
+    frame = calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path)
+
+    out = capsys.readouterr().out
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in out
+    assert [row["summary"] for row in frame.iter_rows(named=True)] == ["Imported Inner Meeting With New Size"]
+
+
+def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata(capsys, tmp_path: Path) -> None:
+    """Test ICBU cache metadata prefers the embedded SQLite database."""
+    icbu_path = tmp_path / "backup.icbu"
+    icbu_path.mkdir()
+    sqlite_path = icbu_path / "Calendar.sqlitedb"
+    (icbu_path / "calendar.ics").write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:ICS Fallback Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    with closing(sqlite3.connect(sqlite_path)) as conn:
+        conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+        conn.commit()
+
+    dataframe_path = tmp_path / "meetings.parquet"
+    frame = calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path, force_import=True)
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert frame.is_empty()
+    assert metadata["source_path"] == str(sqlite_path.resolve())
+    assert f"Found SQLite database in ICBU backup: {sqlite_path}" in capsys.readouterr().out
+
+
 def test_main_reimports_when_saved_dataframe_is_corrupt(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test a corrupt saved DataFrame is rebuilt when the calendar source is available."""
     calendar_path = tmp_path / "calendar.ics"
@@ -1038,7 +1117,7 @@ def test_generate_summary_with_long_titles() -> None:
     assert "A" * 100 + "..." in result
     assert "Short title" in result
     assert "Total Meetings: 2" in result
-    assert "Average Meetings per Day: 1.0" in result
+    assert "Average Meetings per Day: 0.7" in result
 
 
 def test_generate_summary_limits_common_times_and_titles() -> None:
@@ -1109,7 +1188,7 @@ def test_generate_summary_uses_requested_period_for_average() -> None:
 
     assert "- From: July 01, 2023" in result
     assert "- To:   July 11, 2023" in result
-    assert "- Span: 10 days" in result
+    assert "- Span: 11 days" in result
     assert "- Average Meetings per Day: 0.1" in result
 
 
@@ -1380,13 +1459,13 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys) -> None:
 
 @patch("pathlib.Path.home")
 def test_get_calendar_path_auto_discovery_ignores_csv_files(mock_home, capsys) -> None:
-    """Test auto-discovery ignores generic CSV files unless explicitly requested."""
+    """Test auto-discovery ignores CSV files unless explicitly requested."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home_path = Path(tmp_dir)
         mock_home.return_value = home_path
         documents_dir = home_path / "Documents"
         documents_dir.mkdir()
-        (documents_dir / "not-a-calendar.csv").write_text("Amount,Description\n1.00,Coffee\n")
+        (documents_dir / "export.csv").write_text("Subject,Start Date,Start Time\nMeeting,07/01/2023,10:00 AM\n")
 
         with pytest.raises(SystemExit) as exc_info:
             calendar_analyzer.get_calendar_path()
@@ -1394,7 +1473,7 @@ def test_get_calendar_path_auto_discovery_ignores_csv_files(mock_home, capsys) -
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
         assert "✗ No calendar files found" in out
-        assert "not-a-calendar.csv" not in out
+        assert "export.csv" not in out
 
 
 @patch("pathlib.Path.home")

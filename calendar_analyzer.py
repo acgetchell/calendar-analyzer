@@ -285,7 +285,7 @@ def generate_summary(
     data_start, data_end = _frame_date_bounds(frame)
     imported_start_date = options.data_start or data_start
     imported_end_date = options.data_end or data_end
-    date_range_days = max((query_end_date - query_start_date).days, 1)
+    date_range_days = max((query_end_date - query_start_date).days + 1, 1)
     total_meetings = frame.height
     total_hours = frame.select(pl.col("duration_hours").sum()).item()
     avg_meetings_per_day = total_meetings / date_range_days
@@ -440,7 +440,7 @@ def _cached_dataframe_is_usable(dataframe_path: Path, calendar_file: str | Path 
         return True
 
     try:
-        calendar_path = Path(calendar_file).expanduser().resolve()
+        calendar_path = _resolve_calendar_source_path(Path(calendar_file))
     except OSError:
         return False
 
@@ -449,11 +449,16 @@ def _cached_dataframe_is_usable(dataframe_path: Path, calendar_file: str | Path 
 
 def _metadata_matches_calendar(metadata: dict[str, object], calendar_path: Path) -> bool:
     """Return whether saved DataFrame metadata matches a requested calendar source."""
-    if metadata.get("source_path") != str(calendar_path):
+    try:
+        source_path = _resolve_calendar_source_path(calendar_path)
+    except OSError:
+        return False
+
+    if metadata.get("source_path") != str(source_path):
         return False
 
     try:
-        source_stat = calendar_path.stat()
+        source_stat = source_path.stat()
     except OSError:
         return False
 
@@ -567,6 +572,23 @@ def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
     print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
     _print_directory_contents(calendar_path, "Contents of ICBU directory:")
     return raise_system_exit()
+
+
+def _resolve_calendar_source_path(calendar_path: Path) -> Path:
+    """Return the concrete filesystem source used to import a calendar."""
+    resolved_path = calendar_path.expanduser().resolve()
+    if resolved_path.suffix.lower() != ".icbu":
+        return resolved_path
+
+    sqlite_db_path = resolved_path / "Calendar.sqlitedb"
+    if sqlite_db_path.exists():
+        return sqlite_db_path.resolve()
+
+    ics_files = sorted(resolved_path.glob("*.ics"))
+    if ics_files:
+        return ics_files[0].resolve()
+
+    return resolved_path
 
 
 def _print_directory_contents(directory: Path, heading: str) -> None:
@@ -1353,8 +1375,10 @@ def _temporary_sibling_path(destination: Path) -> Path:
 def _cache_metadata(calendar_path: Path, frame: pl.DataFrame) -> str:
     """Return JSON sidecar metadata for a saved DataFrame."""
     try:
-        source_stat = calendar_path.stat()
+        source_path = _resolve_calendar_source_path(calendar_path)
+        source_stat = source_path.stat()
     except OSError:
+        source_path = calendar_path
         source_mtime_ns = None
         source_size = None
     else:
@@ -1364,7 +1388,7 @@ def _cache_metadata(calendar_path: Path, frame: pl.DataFrame) -> str:
     data_start, data_end = _frame_date_bounds(frame)
     metadata = {
         "schema_version": CACHE_SCHEMA_VERSION,
-        "source_path": str(calendar_path),
+        "source_path": str(source_path),
         "source_mtime_ns": source_mtime_ns,
         "source_size": source_size,
         "data_start": data_start.isoformat() if data_start is not None else None,

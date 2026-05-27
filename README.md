@@ -66,7 +66,8 @@ See [scripts/README.md](scripts/README.md) for script linting and formatting det
 4. Continue through the export wizard and save the Outlook for Mac archive (`.olm`) file.
 5. If Outlook asks whether to delete exported items, choose the option to keep them in Outlook.
 
-Outlook `.ics` and `.csv` calendar exports are also supported when available.
+Outlook `.ics` and `.csv` calendar exports are also supported when available. CSV files are only imported when you pass
+them explicitly with `--calendar` because generic CSV files are common in Documents and Downloads.
 
 ### Outlook for Windows
 
@@ -84,7 +85,7 @@ instead.
 Run the analyzer with the exported file:
 
 ```bash
-just run --calendar ~/Documents/your-calendar.olm
+just run --calendar ~/Documents/your-calendar.ics
 ```
 
 On Windows PowerShell:
