@@ -145,6 +145,7 @@ Install-GitBash
 Install-WingetTool -CommandName "shellcheck" -WingetId "koalaman.shellcheck" -DisplayName "ShellCheck"
 Install-WingetTool -CommandName "shfmt" -WingetId "mvdan.shfmt" -DisplayName "shfmt"
 Install-CargoTool -CommandName "just" -CrateName "just"
+Install-CargoTool -CommandName "rumdl" -CrateName "rumdl"
 Install-CargoTool -CommandName "taplo" -CrateName "taplo-cli"
 Install-CargoTool -CommandName "typos" -CrateName "typos-cli"
 Install-CargoTool -CommandName "zizmor" -CrateName "zizmor"

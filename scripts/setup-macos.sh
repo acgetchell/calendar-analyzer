@@ -9,7 +9,7 @@ usage() {
 	cat <<'EOF'
 Usage: scripts/setup-macos.sh [--no-check]
 
-	Installs or verifies uv, just, taplo, typos, shellcheck, shfmt, PowerShell,
+	Installs or verifies uv, just, rumdl, taplo, typos, shellcheck, shfmt, PowerShell,
 	zizmor, and PSScriptAnalyzer; ensures Python 3.11 is available through uv;
 	syncs development dependencies; and runs `just ci` unless --no-check is provided.
 EOF
@@ -112,6 +112,7 @@ ensure_tool() {
 echo "Bootstrapping Calendar Analyzer development tools..."
 ensure_uv
 ensure_tool just just just
+ensure_tool rumdl rumdl rumdl
 ensure_tool taplo taplo taplo-cli
 ensure_tool typos typos-cli typos-cli
 ensure_tool shellcheck shellcheck shellcheck

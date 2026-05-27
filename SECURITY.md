@@ -2,7 +2,8 @@
 
 ## Supported Versions
 
-Use the latest released version from the default branch. Security fixes are not backported to older versions unless noted in a release.
+Use the latest released version from the default branch. Security fixes are not backported to older versions unless noted
+in a release.
 
 ## Reporting a Vulnerability
 
@@ -21,4 +22,5 @@ Include:
 
 ## Security Checks
 
-This project uses GitHub CodeQL, Dependabot security updates, secret scanning with push protection, Ruff security rules, `pip-audit`, and repository-owned Semgrep rules.
+This project uses GitHub CodeQL, Dependabot security updates, secret scanning with push protection, Ruff security rules,
+`pip-audit`, and repository-owned Semgrep rules.
