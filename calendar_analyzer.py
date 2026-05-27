@@ -72,6 +72,7 @@ class SummaryOptions:
     period_end: datetime | None = None
     data_start: date | None = None
     data_end: date | None = None
+    include_data_coverage: bool = True
 
 
 SqliteCalendarRow = tuple[str | None, int, int, Any]
@@ -92,12 +93,12 @@ def print_calendar_export_instructions() -> None:
     """Print instructions for exporting a calendar file."""
     print("\nPlease export your calendar from Calendar or Outlook:")
     print("1. Apple Calendar: select the calendar, then use File > Export")
-    print("2. Outlook for Mac: export an Outlook archive (.olm), or export an ICS calendar when available")
-    print("3. Outlook for Windows: export a calendar-only ICS file with File > Save Calendar")
+    print("2. Microsoft Outlook for Mac: export an Outlook archive (.olm)")
+    print("3. Microsoft Outlook for Windows: export a calendar-only ICS file with File > Save Calendar")
     print("4. Do not export a PST file; PST can include mail, contacts, tasks, and other mailbox data")
     print("5. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
-    print("just run --calendar /path/to/your/calendar.ics")
+    print("calendar-analyzer --calendar /path/to/your/calendar.ics")
 
 
 def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
@@ -223,14 +224,13 @@ def _import_outlook_csv_calendar_meetings(calendar_path: Path) -> list[Meeting]:
 
     try:
         rows = _read_outlook_csv_rows(calendar_path)
+        return _meetings_from_outlook_csv_rows(rows)
     except OSError as error:
         print(f"Error reading Outlook CSV calendar: {error}")
         raise_system_exit()
     except ValueError as error:
         print(f"Error parsing Outlook CSV calendar: {error}")
         raise_system_exit()
-
-    return _meetings_from_outlook_csv_rows(rows)
 
 
 def _import_olm_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -256,7 +256,7 @@ def generate_summary(
     options = options or SummaryOptions()
     if frame.is_empty():
         summary = ["No meetings found in the specified time period."]
-        if options.data_start is not None or options.data_end is not None:
+        if options.include_data_coverage and (options.data_start is not None or options.data_end is not None):
             summary.extend(
                 [
                     "\nImported Data Coverage:",
@@ -298,9 +298,6 @@ def generate_summary(
     summary = [
         f"📅 Calendar Analysis Summary (All times in Pacific Time - Currently {timezone_name})",
         "=" * 70,
-        "\nImported Data Coverage:",
-        f"- From: {_format_summary_date(imported_start_date)}",
-        f"- To:   {_format_summary_date(imported_end_date)}",
         "\nQuery Date Range:",
         f"- From: {query_start_date.strftime('%B %d, %Y')}",
         f"- To:   {query_end_date.strftime('%B %d, %Y')}",
@@ -317,6 +314,12 @@ def generate_summary(
         f"- Average Meeting Duration: {avg_meeting_duration:.1f} hours",
         f"\nTop {options.num_times} Most Common Meeting Times ({timezone_name}):",
     ]
+    if options.include_data_coverage:
+        summary[2:2] = [
+            "\nImported Data Coverage:",
+            f"- From: {_format_summary_date(imported_start_date)}",
+            f"- To:   {_format_summary_date(imported_end_date)}",
+        ]
 
     time_counts = (
         frame.group_by("time")
@@ -344,6 +347,25 @@ def generate_summary(
     return "\n".join(summary)
 
 
+def generate_ai_analysis_prompt(summary: str) -> str:
+    """Wrap a calendar summary in a prompt suitable for AI analysis."""
+    return (
+        "Please analyze this calendar summary so I can understand how my meeting time was spent.\n\n"
+        "Use the data below to:\n"
+        "- summarize the week or selected date range in plain language,\n"
+        "- describe how my time was spent across recurring meeting themes,\n"
+        "- identify likely accomplishments, decisions, or workstreams represented by the meetings,\n"
+        "- draft concise bullets I could adapt for weekly updates or year-end accomplishment summaries,\n"
+        "- point out schedule patterns, meeting load, and follow-up questions that would improve the analysis.\n\n"
+        "Privacy note: this summary was generated locally. It may include private meeting titles "
+        "because I chose to paste it here.\n\n"
+        "Calendar summary:\n"
+        "```text\n"
+        f"{summary.strip()}\n"
+        "```"
+    )
+
+
 def main() -> None:
     """Run the calendar analyzer command-line interface."""
     args = _parse_args()
@@ -353,6 +375,7 @@ def main() -> None:
     excluded_title_patterns = _compile_title_exclusion_patterns(args.exclude_titles)
     start_date, end_date = _resolve_date_range(requested_start_date, requested_end_date, args.days)
     dataframe_path = _resolve_dataframe_path(args.dataframe, args.calendar)
+    output_path = _resolve_output_path(args.output, generate_prompt=args.generate_prompt)
 
     print("📊 Analyzing your calendar...")
     meetings_frame = load_calendar_dataframe(
@@ -363,6 +386,13 @@ def main() -> None:
     data_start, data_end = _frame_date_bounds(meetings_frame)
     meetings_frame = _filter_meetings_frame(meetings_frame, start_date, end_date)
     meetings_frame = _exclude_title_matches_frame(meetings_frame, excluded_title_patterns)
+    if (
+        args.generate_prompt
+        and meetings_frame.is_empty()
+        and not _date_range_overlaps_data(start_date, end_date, data_start, data_end)
+    ):
+        _print_prompt_range_error(start_date, end_date, data_start, data_end)
+        raise_system_exit()
     summary = generate_summary(
         meetings_frame,
         options=SummaryOptions(
@@ -372,9 +402,12 @@ def main() -> None:
             period_end=end_date,
             data_start=data_start,
             data_end=data_end,
+            include_data_coverage=not args.generate_prompt,
         ),
     )
-    _write_or_print_summary(summary, args.output)
+    formatted_output = _format_output(summary, generate_prompt=args.generate_prompt)
+    output_label = "Prompt" if args.generate_prompt else "Analysis"
+    _write_or_print_summary(formatted_output, output_path, output_label=output_label)
 
 
 def raise_system_exit() -> NoReturn:
@@ -402,16 +435,10 @@ def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
     return calendar_path
 
 
-def _resolve_dataframe_path(dataframe_file: str | Path | None, calendar_file: str | Path | None) -> Path:
+def _resolve_dataframe_path(dataframe_file: str | Path | None, _calendar_file: str | Path | None) -> Path:
     """Return the saved Polars DataFrame path for this run."""
     if dataframe_file is not None:
         return Path(dataframe_file).expanduser().resolve()
-
-    if calendar_file is not None:
-        calendar_path = Path(calendar_file).expanduser()
-        if calendar_path.suffix:
-            return calendar_path.with_suffix(f"{calendar_path.suffix}.parquet").resolve()
-        return calendar_path.with_suffix(".parquet").resolve()
 
     return (_user_cache_directory() / "meetings.parquet").resolve()
 
@@ -498,6 +525,34 @@ def _frame_date_bounds(frame: pl.DataFrame) -> tuple[date | None, date | None]:
         return None, None
     bounds = frame.select(pl.col("date").min().alias("start"), pl.col("date").max().alias("end")).row(0, named=True)
     return bounds["start"], bounds["end"]
+
+
+def _date_range_overlaps_data(
+    period_start: datetime,
+    period_end: datetime,
+    data_start: date | None,
+    data_end: date | None,
+) -> bool:
+    """Return whether a requested period overlaps saved meeting data coverage."""
+    if data_start is None or data_end is None:
+        return True
+    return period_start.date() <= data_end and period_end.date() >= data_start
+
+
+def _print_prompt_range_error(
+    period_start: datetime,
+    period_end: datetime,
+    data_start: date | None,
+    data_end: date | None,
+) -> None:
+    """Print a clear error when prompt dates are outside cached data coverage."""
+    print("Error: no cached meeting data overlaps the requested prompt date range.")
+    print(f"Cached meeting data covers: {_format_summary_date(data_start)} to {_format_summary_date(data_end)}")
+    print(
+        "Requested prompt range: "
+        f"{_format_summary_date(period_start.date())} to {_format_summary_date(period_end.date())}"
+    )
+    print("Refresh the cache with: calendar-analyzer --import")
 
 
 def _format_summary_date(value: date | None) -> str:
@@ -1068,10 +1123,17 @@ def _validate_outlook_csv_headers(fieldnames: Iterable[str]) -> None:
 def _meetings_from_outlook_csv_rows(rows: Iterable[dict[str, str]]) -> list[Meeting]:
     """Normalize Outlook CSV rows."""
     meetings: list[Meeting] = []
+    unparsable_start_values: list[str] = []
 
     for row in rows:
+        if _outlook_csv_row_is_non_meeting(row):
+            continue
+
+        start_value = _outlook_csv_start_value_for_diagnostics(row)
         start = _outlook_csv_start_datetime(row)
         if start is None:
+            if start_value is not None:
+                unparsable_start_values.append(start_value)
             continue
 
         start = convert_to_pacific(start)
@@ -1090,20 +1152,45 @@ def _meetings_from_outlook_csv_rows(rows: Iterable[dict[str, str]]) -> list[Meet
             }
         )
 
+    if not meetings and unparsable_start_values:
+        examples = ", ".join(unparsable_start_values[:3])
+        msg = f"Could not parse any Outlook CSV start dates. Example value(s): {examples}"
+        raise ValueError(msg)
+
     return meetings
 
 
 def _outlook_csv_start_datetime(row: dict[str, str]) -> datetime | None:
     """Return the row start datetime, skipping all-day rows."""
-    if _csv_truthy(_csv_value(row, ("All day event", "All Day Event", "All Day", "AllDayEvent"))):
-        return None
-    if _is_non_meeting_free_busy(_csv_value(row, ("Show Time As", "Show As", "Busy Status", "FreeBusyStatus"))):
+    if _outlook_csv_row_is_non_meeting(row):
         return None
 
     return _outlook_split_datetime(row, ("Start Date", "StartDate"), ("Start Time", "StartTime")) or _outlook_datetime(
         _csv_value(row, ("Start", "Starts", "Start Date Time", "StartDateTime")),
         require_time=True,
     )
+
+
+def _outlook_csv_row_is_non_meeting(row: dict[str, str]) -> bool:
+    """Return whether an Outlook CSV row should be skipped as non-meeting time."""
+    return _csv_truthy(
+        _csv_value(row, ("All day event", "All Day Event", "All Day", "AllDayEvent"))
+    ) or _is_non_meeting_free_busy(_csv_value(row, ("Show Time As", "Show As", "Busy Status", "FreeBusyStatus")))
+
+
+def _outlook_csv_start_value_for_diagnostics(row: dict[str, str]) -> str | None:
+    """Return a timed-looking CSV start value that failed parsing, or None for date-only rows."""
+    combined_start = _csv_value(row, ("Start", "Starts", "Start Date Time", "StartDateTime"))
+    if combined_start is not None and _outlook_text_has_time(combined_start):
+        return combined_start
+
+    start_date = _csv_value(row, ("Start Date", "StartDate"))
+    start_time = _csv_value(row, ("Start Time", "StartTime"))
+    if start_date is not None and start_time is not None:
+        return f"{start_date} {start_time}"
+    if start_date is None and start_time is not None:
+        return start_time
+    return None
 
 
 def _outlook_csv_end_datetime(row: dict[str, str], start: datetime) -> datetime:
@@ -1433,10 +1520,7 @@ def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the calendar analyzer CLI."""
     parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
     parser.add_argument("--calendar", help="Path to the exported calendar file (.ics, .olm, .csv, .icbu, .sqlitedb)")
-    parser.add_argument(
-        "--dataframe",
-        help="Path to the saved Polars/Parquet meeting data (default: derived from --calendar or user cache)",
-    )
+    parser.add_argument("--dataframe", help="Path to the saved Polars/Parquet meeting data (default: user cache)")
     parser.add_argument(
         "--import",
         action="store_true",
@@ -1469,7 +1553,12 @@ def _parse_args() -> argparse.Namespace:
         dest="exclude_titles",
         help="Case-insensitive regex for meeting titles to exclude from statistics; may be repeated",
     )
-    parser.add_argument("--output", help="Path to save the analysis summary (default: print to console)")
+    parser.add_argument(
+        "--generate-prompt",
+        action="store_true",
+        help="Wrap the summary in a paste-ready AI analysis prompt",
+    )
+    parser.add_argument("--output", help="Path to save the analysis summary or prompt")
     return parser.parse_args()
 
 
@@ -1515,7 +1604,14 @@ def _validate_date_range(start_date: datetime | None, end_date: datetime | None)
     raise_system_exit()
 
 
-def _write_or_print_summary(summary: str, output: str | None) -> None:
+def _resolve_output_path(output: str | None, *, generate_prompt: bool) -> str | None:
+    """Return the output path for this run."""
+    if output is not None or not generate_prompt:
+        return output
+    return "calendar-prompt.txt"
+
+
+def _write_or_print_summary(summary: str, output: str | None, *, output_label: str = "Analysis") -> None:
     """Write the summary to a file or print it when no output path is supplied."""
     if output is None:
         _write_summary_to_stdout(summary)
@@ -1527,7 +1623,14 @@ def _write_or_print_summary(summary: str, output: str | None) -> None:
         print(f"Error saving to file: {error}")
         raise_system_exit()
 
-    print(f"\nAnalysis saved to: {output}")
+    print(f"\n{output_label} saved to: {output}")
+
+
+def _format_output(summary: str, *, generate_prompt: bool) -> str:
+    """Return the requested user-facing output format."""
+    if generate_prompt:
+        return generate_ai_analysis_prompt(summary)
+    return summary
 
 
 def _write_summary_to_stdout(summary: str) -> None:

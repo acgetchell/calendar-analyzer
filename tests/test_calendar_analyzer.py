@@ -465,10 +465,10 @@ def test_print_calendar_export_instructions(capsys) -> None:
     out = capsys.readouterr().out
     assert "Please export your calendar from Calendar or Outlook:" in out
     assert "Apple Calendar: select the calendar, then use File > Export" in out
-    assert "Outlook for Mac: export an Outlook archive (.olm), or export an ICS calendar when available" in out
-    assert "Outlook for Windows: export a calendar-only ICS file" in out
+    assert "Microsoft Outlook for Mac: export an Outlook archive (.olm)" in out
+    assert "Microsoft Outlook for Windows: export a calendar-only ICS file" in out
     assert "Do not export a PST file" in out
-    assert "just run --calendar" in out
+    assert "calendar-analyzer --calendar" in out
 
 
 def test_generate_summary_no_meetings() -> None:
@@ -543,6 +543,131 @@ def test_file_output_functionality(monkeypatch, capsys) -> None:
     # Clean up
     Path(tmp_ics_path).unlink()
     Path(output_path).unlink()
+
+
+def test_generate_prompt_uses_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test generating a paste-ready AI prompt from cached meeting data."""
+    calendar_path = tmp_path / "calendar.ics"
+    cache_dir = tmp_path / "cache"
+    output_path = tmp_path / "calendar-prompt.txt"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Prompt Format Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(calendar_analyzer, "_user_cache_directory", lambda: cache_dir)
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+    calendar_analyzer.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+            "--generate-prompt",
+        ],
+    )
+    calendar_analyzer.main()
+
+    captured = capsys.readouterr()
+    content = output_path.read_text(encoding="utf-8")
+    assert content.startswith("Please analyze this calendar summary so I can understand how my meeting time was spent.")
+    assert "draft concise bullets I could adapt for weekly updates or year-end accomplishment summaries" in content
+    assert "Privacy note: this summary was generated locally." in content
+    assert "Calendar summary:\n```text" in content
+    assert "Calendar Analysis Summary" in content
+    assert "Query Date Range:" in content
+    assert "Imported Data Coverage:" not in content
+    assert "Prompt Format Meeting" in content
+    assert content.endswith("```")
+    assert f"Found saved Polars DataFrame at: {cache_dir / 'meetings.parquet'}" in captured.out
+    assert f"Prompt saved to: {output_path.name}" in captured.out
+    assert "No calendar files found" not in captured.out
+
+
+def test_generate_prompt_errors_when_requested_range_is_outside_cache(monkeypatch, capsys, tmp_path: Path) -> None:
+    """Test prompt generation explains when cached data does not cover the requested range."""
+    calendar_path = tmp_path / "calendar.ics"
+    cache_dir = tmp_path / "cache"
+    output_path = tmp_path / "calendar-prompt.txt"
+    calendar_path.write_text(
+        textwrap.dedent("""
+        BEGIN:VCALENDAR
+        VERSION:2.0
+        BEGIN:VEVENT
+        DTSTART:20230701T170000Z
+        DURATION:PT1H
+        SUMMARY:Cached Meeting
+        END:VEVENT
+        END:VCALENDAR
+        """),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(calendar_analyzer, "_user_cache_directory", lambda: cache_dir)
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--calendar",
+            str(calendar_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+    calendar_analyzer.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--start-date",
+            "2025-05-01",
+            "--end-date",
+            "2026-04-30",
+            "--generate-prompt",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    assert not output_path.exists()
+    out = capsys.readouterr().out
+    assert "Error: no cached meeting data overlaps the requested prompt date range." in out
+    assert "Cached meeting data covers: July 01, 2023 to July 01, 2023" in out
+    assert "Requested prompt range: May 01, 2025 to April 30, 2026" in out
+    assert "Refresh the cache with: calendar-analyzer --import" in out
 
 
 def test_file_output_error(monkeypatch, capsys) -> None:
@@ -2190,6 +2315,51 @@ def test_analyze_calendar_outlook_csv_requires_start_columns(capsys, tmp_path: P
     out = capsys.readouterr().out
     assert "Error parsing Outlook CSV calendar:" in out
     assert "CSV must include Outlook start columns" in out
+
+
+def test_analyze_calendar_outlook_csv_errors_when_timed_starts_do_not_parse(capsys, tmp_path: Path) -> None:
+    """Test Outlook CSV analysis reports timed-looking rows with unsupported start dates."""
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(
+        textwrap.dedent("""\
+        Subject,Start Date,Start Time,End Date,End Time
+        Broken Start,not-a-date,10:00 AM,07/01/2023,11:00 AM
+        Another Broken Start,07/02/2023,not-a-time,07/02/2023,11:00 AM
+        """),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.analyze_calendar(csv_path)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing Outlook CSV calendar: Could not parse any Outlook CSV start dates." in out
+    assert "not-a-date 10:00 AM" in out
+    assert "07/02/2023 not-a-time" in out
+
+
+def test_analyze_calendar_outlook_csv_errors_when_combined_start_does_not_parse(
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test Outlook CSV analysis reports unsupported combined start values."""
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(
+        textwrap.dedent("""\
+        Subject,Start,End
+        Broken Combined Start,not-a-date 10:00 AM,2023-07-01 11:00:00
+        """),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.analyze_calendar(csv_path)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing Outlook CSV calendar: Could not parse any Outlook CSV start dates." in out
+    assert "not-a-date 10:00 AM" in out
 
 
 def test_analyze_calendar_filters_requested_outlook_csv_range(tmp_path: Path) -> None:
