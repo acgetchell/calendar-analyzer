@@ -2384,6 +2384,20 @@ def test_analyze_calendar_rejects_ics_files(capsys, tmp_path: Path) -> None:
     assert "ICS/iCal files are no longer supported" in capsys.readouterr().out
 
 
+def test_import_calendar_meetings_rejects_unknown_file_type(capsys, tmp_path: Path) -> None:
+    """Test unsupported calendar suffixes report the accepted export formats."""
+    calendar_path = tmp_path / "calendar.txt"
+    calendar_path.write_text("not a calendar", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(calendar_path)
+
+    out = capsys.readouterr().out
+    assert exc_info.value.code == 1
+    assert "Error: Unsupported calendar file type: .txt" in out
+    assert "Supported calendar exports are .icbu, .sqlitedb, .olm, .pst, and explicit Outlook .csv files." in out
+
+
 def test_analyze_calendar_default_date_range() -> None:
     """Test analyze_calendar with default date ranges (no start/end specified)."""
     # Use a recent date that would be within the default 365-day range
@@ -2563,6 +2577,143 @@ class Win32Client:
         return OutlookApplication(self._namespace)
 
 
+def test_import_calendar_meetings_requires_pywin32_on_windows(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test PST import explains the optional Windows dependency when pywin32 is missing."""
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"pst")
+    real_import_module = importlib.import_module
+
+    def import_module(name: str) -> object:
+        if name == "win32com.client":
+            raise ImportError
+        return real_import_module(name)
+
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(pst_path)
+
+    assert exc_info.value.code == 1
+    assert "Error: Outlook PST import requires pywin32 on Windows." in capsys.readouterr().out
+
+
+def test_import_calendar_meetings_reports_com_errors(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test pywin32 COM errors become user-facing PST read failures."""
+
+    class ComError(Exception):
+        """Fake pywin32 COM error."""
+
+    class PyWinTypes:
+        """Fake pywintypes module."""
+
+        com_error = ComError
+
+    class RaisingWin32Client:
+        """Fake win32com.client module that cannot start Outlook."""
+
+        def Dispatch(self, _name: str) -> NoReturn:  # noqa: N802
+            """Raise the fake COM error when Outlook is requested."""
+            message = "MAPI failed"
+            raise ComError(message)
+
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"pst")
+    real_import_module = importlib.import_module
+
+    def import_module(name: str) -> object:
+        if name == "win32com.client":
+            return RaisingWin32Client()
+        if name == "pywintypes":
+            return PyWinTypes()
+        return real_import_module(name)
+
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(pst_path)
+
+    out = capsys.readouterr().out
+    assert exc_info.value.code == 1
+    assert "Error reading Outlook PST calendar: MAPI failed" in out
+
+
+def test_outlook_com_error_types_ignore_unexpected_pywintypes_shape(monkeypatch) -> None:
+    """Test COM error detection falls back safely when pywintypes lacks com_error."""
+
+    class PyWinTypes:
+        """Fake pywintypes module without com_error."""
+
+    def import_module(name: str) -> object:
+        assert name == "pywintypes"
+        return PyWinTypes()
+
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    assert calendar_analyzer._outlook_com_error_types() == (OSError,)  # noqa: SLF001
+
+
+def test_import_calendar_meetings_errors_when_pst_store_is_not_exposed(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test Outlook mount failures that do not expose a store become parse errors."""
+
+    class NoStoreOutlookNamespace(OutlookNamespace):
+        """Namespace that records AddStore calls without exposing a mounted store."""
+
+        def AddStore(self, file_path: str) -> None:  # noqa: N802
+            """Record the mount attempt without changing the Stores collection."""
+            self.added_paths.append(file_path)
+
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"pst")
+    root_folder = OutlookFolder([])
+    namespace = NoStoreOutlookNamespace(root_folder, str(tmp_path / "never-mounted.pst"))
+    real_import_module = importlib.import_module
+
+    def import_module(name: str) -> object:
+        if name == "win32com.client":
+            return Win32Client(namespace)
+        if name == "pywintypes":
+            raise ImportError
+        return real_import_module(name)
+
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(pst_path)
+
+    out = capsys.readouterr().out
+    assert exc_info.value.code == 1
+    assert f"Outlook opened the PST but did not expose a store for {pst_path}" in out
+    assert namespace.added_paths == [str(pst_path)]
+    assert namespace.removed_roots == []
+
+
+def test_meetings_from_outlook_folder_handles_leaf_without_items() -> None:
+    """Test empty Outlook calendar leaf folders produce no meetings."""
+
+    class LeafCalendarFolder:
+        """Calendar folder with no Items or Folders collection."""
+
+        DefaultItemType = calendar_analyzer.OUTLOOK_APPOINTMENT_ITEM_TYPE
+        Items = None
+
+    assert calendar_analyzer._meetings_from_outlook_folder(LeafCalendarFolder()) == []  # noqa: SLF001
+
+
 def test_meetings_from_outlook_folder_filters_calendar_appointments() -> None:
     """Test PST extraction keeps only timed appointment items."""
     root = OutlookFolder(
@@ -2592,6 +2743,56 @@ def test_meetings_from_outlook_folder_filters_calendar_appointments() -> None:
 
     assert [meeting["summary"] for meeting in meetings] == ["Imported PST Meeting"]
     assert meetings[0]["duration_hours"] == 1.5
+
+
+def test_meeting_from_outlook_appointment_handles_missing_end_with_default_duration() -> None:
+    """Test PST appointments without an end time use the default one-hour duration."""
+    appointment = OutlookAppointment(
+        "Missing End PST Meeting",
+        datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC),
+    )
+    appointment_fields: Any = appointment
+    appointment_fields.End = None
+
+    meeting = calendar_analyzer._meeting_from_outlook_appointment(appointment)  # noqa: SLF001
+
+    assert meeting is not None
+    assert meeting["summary"] == "Missing End PST Meeting"
+    assert meeting["duration_hours"] == calendar_analyzer.DEFAULT_DURATION_HOURS
+
+
+def test_meeting_from_outlook_appointment_skips_invalid_start() -> None:
+    """Test PST appointments without a COM datetime start are skipped."""
+    appointment = OutlookAppointment(
+        "Missing Start PST Meeting",
+        datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC),
+    )
+    appointment_fields: Any = appointment
+    appointment_fields.Start = "not a datetime"
+
+    assert calendar_analyzer._meeting_from_outlook_appointment(appointment) is None  # noqa: SLF001
+
+
+def test_meeting_from_outlook_appointment_skips_all_day_like_blocks() -> None:
+    """Test midnight-to-midnight PST blocks are treated as all-day calendar blocks."""
+    appointment = OutlookAppointment(
+        "Midnight PST Block",
+        datetime(2023, 7, 1, 0, 0, tzinfo=calendar_analyzer.PACIFIC),
+        datetime(2023, 7, 2, 0, 0, tzinfo=calendar_analyzer.PACIFIC),
+    )
+
+    assert calendar_analyzer._meeting_from_outlook_appointment(appointment) is None  # noqa: SLF001
+
+
+def test_outlook_com_datetime_assumes_naive_values_are_pacific() -> None:
+    """Test naive COM datetimes are interpreted as Pacific local Outlook times."""
+    value = datetime(2023, 7, 1, 10, 0)  # noqa: DTZ001
+
+    result = calendar_analyzer._outlook_com_datetime(value)  # noqa: SLF001
+
+    assert result == datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC)
 
 
 def test_meetings_from_outlook_folder_skips_non_calendar_folders() -> None:

@@ -197,7 +197,7 @@ def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
 
     print(f"Error: Unsupported calendar file type: {calendar_path.suffix or '<none>'}")
     print("Supported calendar exports are .icbu, .sqlitedb, .olm, .pst, and explicit Outlook .csv files.")
-    return raise_system_exit()
+    raise SystemExit(1)
 
 
 def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -292,7 +292,10 @@ def _outlook_com_error_types() -> tuple[type[BaseException], ...]:
         pywintypes = importlib.import_module("pywintypes")
     except ImportError:
         return (OSError,)
-    return (OSError, pywintypes.com_error)
+    com_error = getattr(pywintypes, "com_error", None)
+    if isinstance(com_error, type) and issubclass(com_error, BaseException):
+        return (OSError, com_error)
+    return (OSError,)
 
 
 def _outlook_store_for_path(namespace: Any, calendar_path: Path) -> Any | None:
