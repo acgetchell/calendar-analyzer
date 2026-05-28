@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import zipfile
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -20,7 +21,6 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 from defusedxml import ElementTree
-from icalendar import Calendar
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -28,12 +28,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC)
-CALENDAR_PATTERNS = ("*.ics", "*.icbu", "*.sqlitedb", "*.olm")
+CALENDAR_PATTERNS = ("*.icbu", "*.sqlitedb", "*.olm", "*.pst")
 CACHE_SCHEMA_VERSION = 1
 DEFAULT_DAYS_BACK = 365
 DEFAULT_DURATION_HOURS = 1.0
 MAX_TIMED_MEETING_HOURS = 8.0
-UNSUPPORTED_CALENDAR_EXTENSIONS = {".pst"}
+UNSUPPORTED_CALENDAR_EXTENSIONS = {".ics"}
+OUTLOOK_APPOINTMENT_CLASS = 26
+OUTLOOK_APPOINTMENT_ITEM_TYPE = 1
 MEETING_FRAME_SCHEMA = pl.Schema(
     {
         "start": pl.Datetime("us"),
@@ -92,13 +94,13 @@ def convert_to_pacific(dt: datetime) -> datetime:
 def print_calendar_export_instructions() -> None:
     """Print instructions for exporting a calendar file."""
     print("\nPlease export your calendar from Calendar or Outlook:")
-    print("1. Apple Calendar: select the calendar, then use File > Export")
-    print("2. Microsoft Outlook for Mac: export an Outlook archive (.olm)")
-    print("3. Microsoft Outlook for Windows: export a calendar-only ICS file with File > Save Calendar")
-    print("4. Do not export a PST file; PST can include mail, contacts, tasks, and other mailbox data")
+    print("1. Apple Calendar on macOS: use File > Export > Calendar Archive to create an .icbu backup")
+    print("2. Microsoft Outlook for Mac: export a legacy Outlook archive (.olm)")
+    print("3. Classic Microsoft Outlook for Windows: export an Outlook Data File (.pst) with Calendar included")
+    print("4. New Outlook for Windows has limited PST calendar support; switch to classic Outlook before exporting")
     print("5. Save the calendar file")
     print("\nThen run this script with the path to your exported file:")
-    print("calendar-analyzer --calendar /path/to/your/calendar.ics")
+    print("calendar-analyzer --calendar /path/to/your/calendar.icbu")
 
 
 def get_calendar_path(calendar_file: str | Path | None = None) -> Path:
@@ -174,12 +176,14 @@ def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
     """Import normalized meetings from a supported calendar export."""
     suffix = calendar_path.suffix.lower()
     if suffix in UNSUPPORTED_CALENDAR_EXTENSIONS:
-        print("Error: Outlook PST files are intentionally unsupported. Export a calendar-only .ics file instead.")
+        print("Error: ICS/iCal files are no longer supported. Use Apple .icbu, Outlook .olm, or Outlook .pst instead.")
         raise_system_exit()
     if suffix == ".sqlitedb":
         return _import_sqlite_calendar_meetings(calendar_path)
     if suffix == ".olm":
         return _import_olm_calendar_meetings(calendar_path)
+    if suffix == ".pst":
+        return _import_pst_calendar_meetings(calendar_path)
     if suffix == ".csv":
         return _import_outlook_csv_calendar_meetings(calendar_path)
     if suffix == ".icbu":
@@ -187,24 +191,13 @@ def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
         if sqlite_db_path.exists():
             print(f"Found SQLite database in ICBU backup: {sqlite_db_path}")
             return _import_sqlite_calendar_meetings(sqlite_db_path)
-
-    ics_path = _resolve_ics_calendar_path(calendar_path)
-    return _import_ics_calendar_meetings(ics_path)
-
-
-def _import_ics_calendar_meetings(calendar_path: Path) -> list[Meeting]:
-    """Import normalized meetings from an ICS calendar file."""
-
-    try:
-        calendar = _read_ics_calendar(calendar_path)
-    except OSError as error:
-        print(f"Error reading calendar file: {error}")
-        raise_system_exit()
-    except ValueError as error:
-        print(f"Error parsing calendar file: {error}")
+        print(f"Error: Could not find Calendar.sqlitedb in ICBU backup: {calendar_path}")
+        _print_directory_contents(calendar_path, "Contents of ICBU directory:")
         raise_system_exit()
 
-    return _meetings_from_ics_events(calendar)
+    print(f"Error: Unsupported calendar file type: {calendar_path.suffix or '<none>'}")
+    print("Supported calendar exports are .icbu, .sqlitedb, .olm, .pst, and explicit Outlook .csv files.")
+    return raise_system_exit()
 
 
 def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -245,6 +238,164 @@ def _import_olm_calendar_meetings(calendar_path: Path) -> list[Meeting]:
     except ValueError as error:
         print(f"Error parsing OLM calendar: {error}")
         raise_system_exit()
+
+
+def _import_pst_calendar_meetings(calendar_path: Path) -> list[Meeting]:
+    """Import normalized calendar appointments from an Outlook PST on Windows."""
+    if not calendar_path.exists():
+        print(f"Error reading Outlook PST calendar: file does not exist: {calendar_path}")
+        raise_system_exit()
+    if sys.platform != "win32":
+        print("Error: Outlook PST import is only available on Windows with classic Microsoft Outlook installed.")
+        raise_system_exit()
+
+    try:
+        win32_client = importlib.import_module("win32com.client")
+    except ImportError:
+        print("Error: Outlook PST import requires pywin32 on Windows.")
+        raise_system_exit()
+
+    com_error_types = _outlook_com_error_types()
+    namespace: Any | None = None
+    mounted_store: Any | None = None
+    mounted_by_analyzer = False
+    try:
+        outlook = win32_client.Dispatch("Outlook.Application")
+        namespace = outlook.GetNamespace("MAPI")
+        mounted_store = _outlook_store_for_path(namespace, calendar_path)
+        if mounted_store is None:
+            store_count_before_add = namespace.Stores.Count
+            namespace.AddStore(str(calendar_path))
+            mounted_by_analyzer = True
+            mounted_store = _outlook_store_for_path(namespace, calendar_path) or _latest_added_outlook_store(
+                namespace,
+                store_count_before_add,
+            )
+        store = _required_outlook_store(mounted_store, calendar_path)
+        root_folder = store.GetRootFolder()
+        return _meetings_from_outlook_folder(root_folder)
+    except ValueError as error:
+        print(f"Error parsing Outlook PST calendar: {error}")
+        raise_system_exit()
+    except com_error_types as error:
+        print(f"Error reading Outlook PST calendar: {error}")
+        raise_system_exit()
+    finally:
+        if namespace is not None and mounted_store is not None and mounted_by_analyzer:
+            with suppress(*com_error_types):
+                namespace.RemoveStore(mounted_store.GetRootFolder())
+
+
+def _outlook_com_error_types() -> tuple[type[BaseException], ...]:
+    """Return pywin32 COM error types when pywin32 is available."""
+    try:
+        pywintypes = importlib.import_module("pywintypes")
+    except ImportError:
+        return (OSError,)
+    return (OSError, pywintypes.com_error)
+
+
+def _outlook_store_for_path(namespace: Any, calendar_path: Path) -> Any | None:
+    """Return the Outlook Store object for a mounted PST path."""
+    requested_path = str(calendar_path.resolve()).lower()
+    stores = namespace.Stores
+    for index in range(1, stores.Count + 1):
+        store = stores.Item(index)
+        file_path = str(getattr(store, "FilePath", "") or "").lower()
+        if file_path == requested_path:
+            return store
+    return None
+
+
+def _latest_added_outlook_store(namespace: Any, previous_count: int) -> Any | None:
+    """Return the likely new Outlook store after AddStore changed the store count."""
+    stores = namespace.Stores
+    if stores.Count <= previous_count:
+        return None
+    return stores.Item(stores.Count)
+
+
+def _required_outlook_store(store: Any | None, calendar_path: Path) -> Any:
+    """Return a mounted Outlook store or raise a user-facing parse error."""
+    if store is None:
+        msg = f"Outlook opened the PST but did not expose a store for {calendar_path}"
+        raise ValueError(msg)
+    return store
+
+
+def _meetings_from_outlook_folder(folder: Any) -> list[Meeting]:
+    """Collect normalized meetings from calendar folders inside an Outlook store."""
+    meetings = (
+        _meetings_from_outlook_items(getattr(folder, "Items", None))
+        if _outlook_folder_holds_appointments(folder)
+        else []
+    )
+    folders = getattr(folder, "Folders", None)
+    if folders is None:
+        return meetings
+
+    for index in range(1, folders.Count + 1):
+        meetings.extend(_meetings_from_outlook_folder(folders.Item(index)))
+    return meetings
+
+
+def _outlook_folder_holds_appointments(folder: Any) -> bool:
+    """Return whether an Outlook folder is meant to contain appointment items."""
+    return getattr(folder, "DefaultItemType", None) == OUTLOOK_APPOINTMENT_ITEM_TYPE
+
+
+def _meetings_from_outlook_items(items: Any) -> list[Meeting]:
+    """Collect normalized meetings from an Outlook Items collection."""
+    if items is None:
+        return []
+
+    with suppress(AttributeError, OSError):
+        items.Sort("[Start]")
+
+    meetings: list[Meeting] = []
+    for index in range(1, items.Count + 1):
+        item = items.Item(index)
+        meeting = _meeting_from_outlook_appointment(item)
+        if meeting is not None:
+            meetings.append(meeting)
+    return meetings
+
+
+def _meeting_from_outlook_appointment(item: Any) -> Meeting | None:
+    """Normalize a Windows Outlook appointment item, skipping non-calendar objects."""
+    message_class = str(getattr(item, "MessageClass", "") or "")
+    item_class = getattr(item, "Class", None)
+    if item_class != OUTLOOK_APPOINTMENT_CLASS and not message_class.startswith("IPM.Appointment"):
+        return None
+    if bool(getattr(item, "AllDayEvent", False)) or _is_non_meeting_free_busy(getattr(item, "BusyStatus", None)):
+        return None
+
+    start = _outlook_com_datetime(getattr(item, "Start", None))
+    if start is None:
+        return None
+    start = convert_to_pacific(start)
+
+    end = _outlook_com_datetime(getattr(item, "End", None)) or start + timedelta(hours=DEFAULT_DURATION_HOURS)
+    duration_hours = _positive_duration_hours(start, convert_to_pacific(end))
+    if _is_all_day_like_calendar_block(start, duration_hours):
+        return None
+
+    return {
+        "start": start,
+        "date": start.date(),
+        "time": start.time(),
+        "summary": str(getattr(item, "Subject", "") or "No Title"),
+        "duration_hours": duration_hours,
+    }
+
+
+def _outlook_com_datetime(value: object) -> datetime | None:
+    """Return an Outlook COM date as a datetime."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=PACIFIC)
+        return value
+    return None
 
 
 def generate_summary(
@@ -614,21 +765,6 @@ def _print_directory_search_result(path: Path, calendar_files: list[Path]) -> No
         print(f"    ... and {len(calendar_files) - 5} more")
 
 
-def _resolve_ics_calendar_path(calendar_path: Path) -> Path:
-    """Return the ICS path to analyze, including the first ICS inside an ICBU backup."""
-    if calendar_path.suffix.lower() != ".icbu":
-        return calendar_path
-
-    if ics_files := sorted(calendar_path.glob("*.ics")):
-        ics_path = ics_files[0]
-        print(f"Found ICS file in ICBU backup: {ics_path}")
-        return ics_path
-
-    print(f"Error: Could not find calendar data (SQLite or ICS) in {calendar_path}")
-    _print_directory_contents(calendar_path, "Contents of ICBU directory:")
-    return raise_system_exit()
-
-
 def _resolve_calendar_source_path(calendar_path: Path) -> Path:
     """Return the concrete filesystem source used to import a calendar."""
     resolved_path = calendar_path.expanduser().resolve()
@@ -638,10 +774,6 @@ def _resolve_calendar_source_path(calendar_path: Path) -> Path:
     sqlite_db_path = resolved_path / "Calendar.sqlitedb"
     if sqlite_db_path.exists():
         return sqlite_db_path.resolve()
-
-    ics_files = sorted(resolved_path.glob("*.ics"))
-    if ics_files:
-        return ics_files[0].resolve()
 
     return resolved_path
 
@@ -665,153 +797,6 @@ def _resolve_date_range(
     resolved_end_date = end_date or datetime.now(PACIFIC)
     resolved_start_date = start_date or resolved_end_date - timedelta(days=days_back)
     return resolved_start_date, resolved_end_date
-
-
-def _read_ics_calendar(calendar_path: Path) -> Calendar:
-    """Read and parse an ICS calendar file."""
-    with calendar_path.open("rb") as calendar_file:
-        return Calendar.from_ical(calendar_file.read())
-
-
-def _meetings_from_ics_events(calendar: Calendar) -> list[Meeting]:
-    """Collect normalized meetings from VEVENT entries."""
-    meetings: list[Meeting] = []
-
-    for event in calendar.walk("VEVENT"):
-        if _event_is_transparent(event) or _event_is_marked_all_day(event) or _event_is_non_meeting_status(event):
-            continue
-
-        raw_start = _event_start_datetime(event)
-        if raw_start is None:
-            continue
-
-        start = convert_to_pacific(raw_start)
-        duration_hours = _event_duration_hours(event, start)
-        if (
-            _is_all_day_like_calendar_block(start, duration_hours)
-            or _is_floating_midnight(raw_start)
-            or _is_default_duration_source_midnight(event, raw_start)
-        ):
-            continue
-
-        meeting = _meeting_from_event(event, start, duration_hours)
-        meetings.append(meeting)
-
-    return meetings
-
-
-def _event_start_datetime(event: Any) -> datetime | None:
-    """Return a VEVENT start datetime when the event has one."""
-    start = event.get("dtstart")
-    if start is None or not isinstance(start.dt, datetime):
-        return None
-    return start.dt
-
-
-def _event_is_transparent(event: Any) -> bool:
-    """Return whether a VEVENT is marked free/transparent."""
-    transparency = event.get("transp")
-    return str(transparency or "").strip().upper() == "TRANSPARENT"
-
-
-def _event_is_non_meeting_status(event: Any) -> bool:
-    """Return whether Microsoft ICS metadata marks an event as non-meeting time."""
-    return any(
-        _is_non_meeting_free_busy(event.get(property_name))
-        for property_name in (
-            "X-MICROSOFT-CDO-BUSYSTATUS",
-            "X-MICROSOFT-CDO-INTENDEDSTATUS",
-        )
-    )
-
-
-def _event_is_marked_all_day(event: Any) -> bool:
-    """Return whether a VEVENT has vendor metadata marking it all-day."""
-    return _event_has_truthy_property(
-        event,
-        (
-            "X-MICROSOFT-CDO-ALLDAYEVENT",
-            "X-MICROSOFT-MSNCALENDAR-ALLDAYEVENT",
-        ),
-    )
-
-
-def _event_has_truthy_property(event: Any, property_names: tuple[str, ...]) -> bool:
-    """Return whether any event property has a true-like value."""
-    return any(_ics_truthy(event.get(property_name)) for property_name in property_names)
-
-
-def _ics_truthy(value: object) -> bool:
-    """Return whether an ICS property value is true-like."""
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
-
-
-def _event_duration_hours(event: Any, start: datetime) -> float:
-    """Resolve a VEVENT duration in hours from duration, dtend, or a default."""
-    duration = event.get("duration")
-    if isinstance(duration, timedelta):
-        return _positive_duration_value_hours(duration.total_seconds() / 3600)
-
-    duration_dt = getattr(duration, "dt", None)
-    if isinstance(duration_dt, timedelta):
-        return _positive_duration_value_hours(duration_dt.total_seconds() / 3600)
-
-    if duration is not None:
-        return _duration_string_hours(str(duration))
-
-    return _dtend_duration_hours(event, start) or DEFAULT_DURATION_HOURS
-
-
-def _duration_string_hours(duration: str) -> float:
-    """Parse simple ICS duration strings like PT1H into hours."""
-    if duration.startswith("PT") and duration.endswith("H"):
-        try:
-            return _positive_duration_value_hours(float(duration[2:-1]))
-        except ValueError:
-            return DEFAULT_DURATION_HOURS
-    return DEFAULT_DURATION_HOURS
-
-
-def _positive_duration_value_hours(duration_hours: float) -> float:
-    """Return a positive explicit duration or the default meeting duration."""
-    if duration_hours <= 0:
-        return DEFAULT_DURATION_HOURS
-    return duration_hours
-
-
-def _dtend_duration_hours(event: Any, start: datetime) -> float | None:
-    """Calculate event duration from dtend when it is available."""
-    end = event.get("dtend")
-    if end is None or not isinstance(end.dt, datetime):
-        return None
-
-    end_dt = convert_to_pacific(end.dt)
-    return _positive_duration_hours(start, end_dt)
-
-
-def _is_default_duration_source_midnight(event: Any, raw_start: datetime) -> bool:
-    """Return whether an event looks like an all-day export downgraded to a default one-hour meeting."""
-    return _starts_at_midnight(raw_start) and not _event_has_explicit_timed_duration(event)
-
-
-def _event_has_explicit_timed_duration(event: Any) -> bool:
-    """Return whether an ICS event has an explicit timed duration or end."""
-    if event.get("duration") is not None:
-        return True
-
-    end = event.get("dtend")
-    return end is not None and isinstance(end.dt, datetime)
-
-
-def _meeting_from_event(event: Any, start: datetime, duration_hours: float) -> Meeting:
-    """Normalize a VEVENT into the meeting shape used by reporting."""
-    return {
-        "start": start,
-        "date": start.date(),
-        "time": start.time(),
-        "summary": str(event.get("summary", "No Title")),
-        "duration_hours": duration_hours,
-    }
 
 
 def _fetch_sqlite_calendar_rows(
@@ -1321,11 +1306,6 @@ def _is_all_day_like_calendar_block(start: datetime, duration_hours: float) -> b
     return starts_at_midnight or duration_hours >= MAX_TIMED_MEETING_HOURS
 
 
-def _is_floating_midnight(start: datetime) -> bool:
-    """Return whether an ICS floating local start time is midnight."""
-    return start.tzinfo is None and _starts_at_midnight(start)
-
-
 def _starts_at_midnight(start: datetime) -> bool:
     """Return whether a datetime starts exactly at midnight."""
     return start.timetz().replace(tzinfo=None) == time()
@@ -1519,7 +1499,7 @@ def _exclude_title_matches_frame(
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments for the calendar analyzer CLI."""
     parser = argparse.ArgumentParser(description="Analyze calendar events from a specified date range.")
-    parser.add_argument("--calendar", help="Path to the exported calendar file (.ics, .olm, .csv, .icbu, .sqlitedb)")
+    parser.add_argument("--calendar", help="Path to the exported calendar file (.icbu, .sqlitedb, .olm, .pst, .csv)")
     parser.add_argument("--dataframe", help="Path to the saved Polars/Parquet meeting data (default: user cache)")
     parser.add_argument(
         "--import",

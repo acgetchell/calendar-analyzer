@@ -1,5 +1,6 @@
 """Tests for calendar_analyzer module."""
 
+import importlib
 import io
 import json
 import os
@@ -63,23 +64,28 @@ class BinaryStdoutBuffer:
         """Flush the binary stream."""
 
 
-def create_temp_ics_file(content: str, suffix: str = ".ics") -> str:
-    """Helper function to create a temporary ICS file with specified content.
-
-    Args:
-        content (str): The ICS content to write to the file
-        suffix (str): File suffix (default: ".ics")
-
-    Returns:
-        str: Path to the created temporary file
-
-    Note:
-        The caller is responsible for cleaning up the file using os.unlink()
-    """
-    with tempfile.NamedTemporaryFile(suffix=suffix, mode="w+", delete=False) as tmp:
-        tmp.write(content)
-        tmp.flush()
-        return tmp.name
+def create_temp_sqlite_calendar(
+    meetings: list[tuple[str | None, datetime, datetime, int]] | None = None,
+) -> str:
+    """Helper function to create a temporary Apple Calendar SQLite database."""
+    with tempfile.NamedTemporaryFile(suffix=".sqlitedb", delete=False) as tmp:
+        tmp_path = tmp.name
+    with closing(sqlite3.connect(tmp_path)) as conn:
+        conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER, all_day INTEGER)")
+        conn.executemany(
+            "INSERT INTO CalendarItem (summary, start_date, end_date, all_day) VALUES (?, ?, ?, ?)",
+            [
+                (
+                    summary,
+                    int((start - calendar_analyzer.APPLE_EPOCH).total_seconds()),
+                    int((end - calendar_analyzer.APPLE_EPOCH).total_seconds()),
+                    all_day,
+                )
+                for summary, start, end, all_day in meetings or []
+            ],
+        )
+        conn.commit()
+    return tmp_path
 
 
 def create_temp_olm_file(calendar_xml: str) -> str:
@@ -91,11 +97,11 @@ def create_temp_olm_file(calendar_xml: str) -> str:
     return tmp_path
 
 
-def create_temp_dummy_file(suffix: str = ".ics") -> str:
+def create_temp_dummy_file(suffix: str = ".sqlitedb") -> str:
     """Helper function to create a temporary dummy file path.
 
     Args:
-        suffix (str): File suffix (default: ".ics")
+        suffix (str): File suffix (default: ".sqlitedb")
 
     Returns:
         str: Path to the created temporary file
@@ -132,28 +138,25 @@ def analysis_result(frame: pl.DataFrame) -> tuple[list[dict[str, Any]], dict[str
     return meetings, stats
 
 
-def test_analyze_mock_ics(monkeypatch, capsys) -> None:
-    """Test analyzing a mock ICS calendar file with sample events."""
-    # Step 1: Create a mock ICS calendar file
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230702T150000Z
-    DURATION:PT2H
-    SUMMARY:Project Sync
-    END:VEVENT
-    END:VCALENDAR
-    """)
+def test_analyze_mock_sqlite(monkeypatch, capsys) -> None:
+    """Test analyzing a mock Apple Calendar SQLite database."""
+    tmp_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            ),
+            (
+                "Project Sync",
+                datetime(2023, 7, 2, 22, 0, tzinfo=UTC),
+                datetime(2023, 7, 3, 0, 0, tzinfo=UTC),
+                0,
+            ),
+        ]
+    )
 
-    tmp_path = create_temp_ics_file(ics_content)
-
-    # Step 2: Patch arguments to simulate CLI input
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -169,10 +172,8 @@ def test_analyze_mock_ics(monkeypatch, capsys) -> None:
         ],
     )
 
-    # Step 3: Run the script
     calendar_analyzer.main()
 
-    # Step 4: Capture and validate output
     out = capsys.readouterr().out
     assert "Test Meeting" in out
     assert "Project Sync" in out
@@ -180,31 +181,31 @@ def test_analyze_mock_ics(monkeypatch, capsys) -> None:
     assert "Total Meeting Hours: 3.0" in out
 
 
-def test_main_excludes_titles_by_regex(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_main_excludes_titles_by_regex(monkeypatch, capsys) -> None:
     """Test title exclusion regexes remove matching meetings from stats and output."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T100000Z
-        DURATION:PT1H
-        SUMMARY:SVM Town Hall
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T120000Z
-        DURATION:PT1H
-        SUMMARY:All VMTH Meeting
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T140000Z
-        DURATION:PT1H
-        SUMMARY:Project Sync
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "SVM Town Hall",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                ),
+                (
+                    "All VMTH Meeting",
+                    datetime(2023, 7, 1, 19, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 20, 0, tzinfo=UTC),
+                    0,
+                ),
+                (
+                    "Project Sync",
+                    datetime(2023, 7, 1, 21, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 22, 0, tzinfo=UTC),
+                    0,
+                ),
+            ]
+        )
     )
 
     monkeypatch.setattr(
@@ -236,8 +237,8 @@ def test_main_excludes_titles_by_regex(monkeypatch, capsys, tmp_path: Path) -> N
 
 def test_main_invalid_exclude_title_regex_exits(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test invalid title exclusion regexes fail before analysis."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+    calendar_path = tmp_path / "calendar.sqlitedb"
+    calendar_path.write_bytes(b"")
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -337,47 +338,41 @@ def test_end_date_before_start_date(monkeypatch, capsys) -> None:
 
 def test_valid_date_formats(monkeypatch, capsys) -> None:
     """Test that valid date formats are parsed correctly."""
-    # Create a mock ICS file
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_path = create_temp_ics_file(ics_content)
+    tmp_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            )
+        ]
+    )
 
     monkeypatch.setattr(
         "sys.argv",
         ["calendar-analyzer", "--calendar", tmp_path, "--start-date", "2023-06-30", "--end-date", "2023-07-31"],
     )
 
-    # Should not raise SystemExit
     calendar_analyzer.main()
 
     out = capsys.readouterr().out
     assert "Test Meeting" in out
 
 
-def test_cli_end_date_includes_entire_calendar_day(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_cli_end_date_includes_entire_calendar_day(monkeypatch, capsys) -> None:
     """Test --end-date includes meetings later on that date."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20240731T190000Z
-        DURATION:PT1H
-        SUMMARY:End Date Noon Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "End Date Noon Meeting",
+                    datetime(2024, 7, 31, 19, 0, tzinfo=UTC),
+                    datetime(2024, 7, 31, 20, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
     monkeypatch.setattr(
         "sys.argv",
@@ -464,10 +459,10 @@ def test_print_calendar_export_instructions(capsys) -> None:
 
     out = capsys.readouterr().out
     assert "Please export your calendar from Calendar or Outlook:" in out
-    assert "Apple Calendar: select the calendar, then use File > Export" in out
-    assert "Microsoft Outlook for Mac: export an Outlook archive (.olm)" in out
-    assert "Microsoft Outlook for Windows: export a calendar-only ICS file" in out
-    assert "Do not export a PST file" in out
+    assert "Apple Calendar on macOS: use File > Export > Calendar Archive" in out
+    assert "Microsoft Outlook for Mac: export a legacy Outlook archive (.olm)" in out
+    assert "Classic Microsoft Outlook for Windows: export an Outlook Data File (.pst)" in out
+    assert "New Outlook for Windows has limited PST calendar support" in out
     assert "calendar-analyzer --calendar" in out
 
 
@@ -497,19 +492,16 @@ def test_generate_summary_no_meetings_shows_optional_ranges() -> None:
 
 def test_file_output_functionality(monkeypatch, capsys) -> None:
     """Test saving analysis to a file."""
-    # Create a mock ICS file
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_ics_path = create_temp_ics_file(ics_content)
+    tmp_calendar_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            )
+        ]
+    )
 
     with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmp_output:
         output_path = tmp_output.name
@@ -519,7 +511,7 @@ def test_file_output_functionality(monkeypatch, capsys) -> None:
         [
             "calendar-analyzer",
             "--calendar",
-            tmp_ics_path,
+            tmp_calendar_path,
             "--start-date",
             "2023-06-30",
             "--end-date",
@@ -541,28 +533,26 @@ def test_file_output_functionality(monkeypatch, capsys) -> None:
     assert f"Analysis saved to: {output_path}" in out
 
     # Clean up
-    Path(tmp_ics_path).unlink()
+    Path(tmp_calendar_path).unlink()
     Path(output_path).unlink()
 
 
 def test_generate_prompt_uses_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test generating a paste-ready AI prompt from cached meeting data."""
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Prompt Format Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
     cache_dir = tmp_path / "cache"
     output_path = tmp_path / "calendar-prompt.txt"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Prompt Format Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(calendar_analyzer, "_user_cache_directory", lambda: cache_dir)
     monkeypatch.chdir(tmp_path)
 
@@ -612,22 +602,20 @@ def test_generate_prompt_uses_saved_dataframe_without_calendar(monkeypatch, caps
 
 def test_generate_prompt_errors_when_requested_range_is_outside_cache(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test prompt generation explains when cached data does not cover the requested range."""
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
     cache_dir = tmp_path / "cache"
     output_path = tmp_path / "calendar-prompt.txt"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Cached Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(calendar_analyzer, "_user_cache_directory", lambda: cache_dir)
     monkeypatch.chdir(tmp_path)
 
@@ -672,18 +660,16 @@ def test_generate_prompt_errors_when_requested_range_is_outside_cache(monkeypatc
 
 def test_file_output_error(monkeypatch, capsys) -> None:
     """Test file output error handling."""
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_path = create_temp_ics_file(ics_content)
+    tmp_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            )
+        ]
+    )
 
     with tempfile.TemporaryDirectory() as output_dir:
         monkeypatch.setattr(
@@ -714,17 +700,16 @@ def test_file_output_error(monkeypatch, capsys) -> None:
 
 def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
     """Test failed output replacement preserves existing file content."""
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-    tmp_ics_path = create_temp_ics_file(ics_content)
+    tmp_calendar_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            )
+        ]
+    )
     output_path = Path(create_temp_dummy_file(".txt"))
     output_path.write_text("existing content", encoding="utf-8")
 
@@ -738,7 +723,7 @@ def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
         [
             "calendar-analyzer",
             "--calendar",
-            tmp_ics_path,
+            tmp_calendar_path,
             "--start-date",
             "2023-06-30",
             "--end-date",
@@ -754,25 +739,23 @@ def test_file_output_error_preserves_existing_file(monkeypatch, capsys) -> None:
     assert exc_info.value.code == 1
     assert output_path.read_text(encoding="utf-8") == "existing content"
     assert "Error saving to file: simulated write failure" in capsys.readouterr().out
-    Path(tmp_ics_path).unlink()
+    Path(tmp_calendar_path).unlink()
     output_path.unlink()
 
 
 def test_main_uses_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test the CLI can report from a saved Polars DataFrame before finding a calendar."""
-    source_path = tmp_path / "calendar.ics"
-    source_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Cached Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    source_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
     dataframe_path = tmp_path / "meetings.parquet"
     calendar_analyzer.load_calendar_dataframe(source_path, dataframe_path, force_import=True)
@@ -801,36 +784,35 @@ def test_main_uses_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_pat
 
 def test_main_import_option_refreshes_saved_dataframe(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test --import refreshes cached meeting data from the calendar export."""
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = tmp_path / "calendar.sqlitedb"
     dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Stale Cached Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Stale Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
     capsys.readouterr()
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Imported Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    calendar_path.unlink()
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Imported Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
 
     monkeypatch.setattr(
         "sys.argv",
@@ -856,44 +838,43 @@ def test_main_import_option_refreshes_saved_dataframe(monkeypatch, capsys, tmp_p
     assert "Stale Cached Meeting" not in out
 
 
-def test_load_calendar_dataframe_tracks_icbu_inner_ics_metadata(capsys, tmp_path: Path) -> None:
-    """Test ICBU cache validity follows the embedded calendar file."""
+def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata_changes(capsys, tmp_path: Path) -> None:
+    """Test ICBU cache validity follows the embedded SQLite database."""
     icbu_path = tmp_path / "backup.icbu"
     icbu_path.mkdir()
-    ics_path = icbu_path / "calendar.ics"
+    sqlite_path = icbu_path / "Calendar.sqlitedb"
     dataframe_path = tmp_path / "meetings.parquet"
-    ics_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Stale Inner Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Stale Inner Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(sqlite_path)
     calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path, force_import=True)
     metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["source_path"] == str(ics_path.resolve())
+    assert metadata["source_path"] == str(sqlite_path.resolve())
     capsys.readouterr()
 
-    ics_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Imported Inner Meeting With New Size
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    sqlite_path.unlink()
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Imported Inner Meeting With New Size",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(sqlite_path)
 
     frame = calendar_analyzer.load_calendar_dataframe(icbu_path, dataframe_path)
 
@@ -907,19 +888,6 @@ def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata(capsys, tmp_path: P
     icbu_path = tmp_path / "backup.icbu"
     icbu_path.mkdir()
     sqlite_path = icbu_path / "Calendar.sqlitedb"
-    (icbu_path / "calendar.ics").write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:ICS Fallback Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
     with closing(sqlite3.connect(sqlite_path)) as conn:
         conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
         conn.commit()
@@ -936,21 +904,19 @@ def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata(capsys, tmp_path: P
 
 def test_main_reimports_when_saved_dataframe_is_corrupt(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test a corrupt saved DataFrame is rebuilt when the calendar source is available."""
-    calendar_path = tmp_path / "calendar.ics"
-    dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Recovered Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Recovered Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
+    dataframe_path = tmp_path / "meetings.parquet"
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
     dataframe_path.write_text("not parquet", encoding="utf-8")
     capsys.readouterr()
@@ -980,21 +946,19 @@ def test_main_reimports_when_saved_dataframe_is_corrupt(monkeypatch, capsys, tmp
 
 def test_main_exits_for_corrupt_saved_dataframe_without_calendar(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test cache-only runs fail clearly when the saved DataFrame cannot be read."""
-    calendar_path = tmp_path / "calendar.ics"
-    dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Cached Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
+    dataframe_path = tmp_path / "meetings.parquet"
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
     dataframe_path.write_text("not parquet", encoding="utf-8")
     capsys.readouterr()
@@ -1024,21 +988,19 @@ def test_main_exits_for_corrupt_saved_dataframe_without_calendar(monkeypatch, ca
 
 def test_main_exits_for_saved_dataframe_missing_columns(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test cache-only runs report saved DataFrames with missing schema columns."""
-    calendar_path = tmp_path / "calendar.ics"
-    dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Cached Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
+    dataframe_path = tmp_path / "meetings.parquet"
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
     pl.read_parquet(dataframe_path).drop("duration_hours").write_parquet(dataframe_path)
     capsys.readouterr()
@@ -1067,35 +1029,34 @@ def test_main_exits_for_saved_dataframe_missing_columns(monkeypatch, capsys, tmp
 
 def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test failed cache rewrites keep the previous readable DataFrame."""
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = tmp_path / "calendar.sqlitedb"
     dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DURATION:PT1H
-        SUMMARY:Original Cache
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Original Cache",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230702T170000Z
-        DURATION:PT2H
-        SUMMARY:Replacement Cache
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
+    calendar_path.unlink()
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Replacement Cache",
+                    datetime(2023, 7, 2, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 2, 19, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
 
     def fail_metadata(*_args, **_kwargs) -> NoReturn:
         message = "simulated metadata failure"
@@ -1115,10 +1076,10 @@ def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatc
 def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path: Path) -> None:
     """Test cached DataFrames are rebuilt when sidecar metadata is unusable."""
     dataframe_path = tmp_path / "meetings.parquet"
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = tmp_path / "calendar.sqlitedb"
     metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
     meeting_frame([]).write_parquet(dataframe_path)
-    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+    Path(create_temp_sqlite_calendar()).replace(calendar_path)
 
     metadata_path.write_text("{not json", encoding="utf-8")
     assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
@@ -1146,10 +1107,9 @@ def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path
 
 def test_cache_metadata_handles_unstatable_calendar_source(monkeypatch, tmp_path: Path) -> None:
     """Test cache metadata records unknown source stats when stat fails."""
-    calendar_path = tmp_path / "calendar.ics"
+    calendar_path = Path(create_temp_sqlite_calendar())
     dataframe_path = tmp_path / "meetings.parquet"
     metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
-    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
 
     def raise_source_error(_calendar_path: Path) -> Path:
         message = "source vanished"
@@ -1160,31 +1120,30 @@ def test_cache_metadata_handles_unstatable_calendar_source(monkeypatch, tmp_path
     calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
-    assert metadata["source_path"] == str(calendar_path)
+    assert metadata["source_path"] == str(calendar_path.resolve())
     assert metadata["source_mtime_ns"] is None
     assert metadata["source_size"] is None
 
 
 def test_main_supports_text_only_stdout(monkeypatch) -> None:
     """Test summary output works when stdout has no binary buffer."""
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-    tmp_ics_path = create_temp_ics_file(ics_content)
+    tmp_calendar_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Test Meeting",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            )
+        ]
+    )
     stdout = io.StringIO()
     monkeypatch.setattr(
         "sys.argv",
         [
             "calendar-analyzer",
             "--calendar",
-            tmp_ics_path,
+            tmp_calendar_path,
             "--start-date",
             "2023-06-30",
             "--end-date",
@@ -1198,24 +1157,22 @@ def test_main_supports_text_only_stdout(monkeypatch) -> None:
     out = stdout.getvalue()
     assert "Calendar Analysis Summary" in out
     assert "Test Meeting" in out
-    Path(tmp_ics_path).unlink()
+    Path(tmp_calendar_path).unlink()
 
 
-def test_main_flushes_status_output_before_binary_summary(monkeypatch, tmp_path: Path) -> None:
+def test_main_flushes_status_output_before_binary_summary(monkeypatch) -> None:
     """Test binary summary writes preserve earlier text output order."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T100000Z
-        DURATION:PT1H
-        SUMMARY:Ordered Output Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Ordered Output Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
     )
     stdout = BufferedTextStdout()
     monkeypatch.setattr(
@@ -1241,80 +1198,14 @@ def test_main_flushes_status_output_before_binary_summary(monkeypatch, tmp_path:
 
 def test_calendar_file_read_error(monkeypatch, capsys) -> None:
     """Test error handling when calendar file cannot be read."""
-    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", "/nonexistent/file.ics"])
+    monkeypatch.setattr("sys.argv", ["calendar-analyzer", "--calendar", "/nonexistent/file.pst"])
 
     with pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.main()
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out
-    assert "Error reading calendar file:" in out
-
-
-def test_analyze_calendar_with_different_duration_formats() -> None:
-    """Test calendar analysis with various duration formats."""
-    # Test with DTEND instead of DURATION
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DTEND:20230701T120000Z
-    SUMMARY:Meeting with DTEND
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230701T140000Z
-    SUMMARY:Meeting without duration
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_path = create_temp_ics_file(ics_content)
-
-    _, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            Path(tmp_path),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
-    )
-
-    # Should have 2 meetings
-    assert stats["total_meetings"] == 2
-    # First meeting should have some duration, second defaults to 1 hour
-    assert stats["total_hours"] >= 2.0
-
-    # Clean up
-    Path(tmp_path).unlink()
-
-
-def test_ics_explicit_duration_marks_midnight_event_as_timed() -> None:
-    """Test midnight ICS events with explicit durations are treated as timed."""
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T000000Z
-    DURATION:PT2H
-    SUMMARY:Midnight Timed Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-    tmp_path = create_temp_ics_file(ics_content)
-
-    try:
-        meetings, stats = analysis_result(
-            calendar_analyzer.analyze_calendar(
-                Path(tmp_path),
-                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-            )
-        )
-    finally:
-        Path(tmp_path).unlink()
-
-    assert stats == {"total_meetings": 1, "total_hours": 2.0}
-    assert [meeting["summary"] for meeting in meetings] == ["Midnight Timed Meeting"]
+    assert "Error reading Outlook PST calendar: file does not exist:" in out
 
 
 def test_generate_summary_with_long_titles() -> None:
@@ -1452,28 +1343,28 @@ def test_generate_summary_shows_imported_coverage_and_query_range() -> None:
 
 def test_analyze_calendar_date_filtering() -> None:
     """Test that date filtering works correctly."""
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230615T100000Z
-    DURATION:PT1H
-    SUMMARY:Before Range
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:In Range
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230715T100000Z
-    DURATION:PT1H
-    SUMMARY:After Range
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_path = create_temp_ics_file(ics_content)
+    tmp_path = create_temp_sqlite_calendar(
+        [
+            (
+                "Before Range",
+                datetime(2023, 6, 15, 17, 0, tzinfo=UTC),
+                datetime(2023, 6, 15, 18, 0, tzinfo=UTC),
+                0,
+            ),
+            (
+                "In Range",
+                datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                0,
+            ),
+            (
+                "After Range",
+                datetime(2023, 7, 15, 17, 0, tzinfo=UTC),
+                datetime(2023, 7, 15, 18, 0, tzinfo=UTC),
+                0,
+            ),
+        ]
+    )
 
     meetings, stats = analysis_result(
         calendar_analyzer.analyze_calendar(
@@ -1483,112 +1374,15 @@ def test_analyze_calendar_date_filtering() -> None:
         )
     )
 
-    # Should only have the meeting in range
     assert stats["total_meetings"] == 1
     assert meetings[0]["summary"] == "In Range"
 
-    # Clean up
     Path(tmp_path).unlink()
-
-
-def test_analyze_calendar_defaults_negative_ics_dtend_duration(tmp_path: Path) -> None:
-    """Test malformed ICS events cannot subtract from total meeting hours."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DTEND:20230701T160000Z
-        SUMMARY:Negative Duration
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
-
-    meetings, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            calendar_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
-    )
-
-    assert stats == {"total_meetings": 1, "total_hours": 1.0}
-    assert meetings[0]["duration_hours"] == calendar_analyzer.DEFAULT_DURATION_HOURS
-
-
-def test_analyze_calendar_skips_ics_all_day_events(tmp_path: Path) -> None:
-    """Test ICS all-day-like events are excluded as calendar blocks."""
-    calendar_path = tmp_path / "calendar.ics"
-    calendar_path.write_text(
-        textwrap.dedent("""
-        BEGIN:VCALENDAR
-        VERSION:2.0
-        BEGIN:VEVENT
-        DTSTART;VALUE=DATE:20230701
-        DTEND;VALUE=DATE:20230702
-        SUMMARY:ICS All Day Event
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T160000Z
-        DTEND:20230701T170000Z
-        TRANSP:TRANSPARENT
-        SUMMARY:Free Calendar Hold
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DTEND:20230701T180000Z
-        X-MICROSOFT-CDO-BUSYSTATUS:OOF
-        SUMMARY:Out Of Office Hold
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230702T000000
-        DURATION:PT1H
-        SUMMARY:Midnight Export Block
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230702T000000Z
-        SUMMARY:UTC Midnight Vacation Export
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T120000Z
-        X-MICROSOFT-CDO-ALLDAYEVENT:TRUE
-        SUMMARY:Microsoft All Day Vacation
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230703T090000
-        DURATION:PT8H
-        SUMMARY:Workday Block
-        END:VEVENT
-        BEGIN:VEVENT
-        DTSTART:20230701T170000Z
-        DTEND:20230701T180000Z
-        SUMMARY:ICS Timed Meeting
-        END:VEVENT
-        END:VCALENDAR
-        """),
-        encoding="utf-8",
-    )
-
-    meetings, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            calendar_path,
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
-    )
-
-    assert stats == {"total_meetings": 1, "total_hours": 1.0}
-    assert [meeting["summary"] for meeting in meetings] == ["ICS Timed Meeting"]
 
 
 def test_get_calendar_path_with_specified_file(capsys) -> None:
     """Test get_calendar_path when a specific file is provided."""
-    # Create a temporary file
-    tmp_path = create_temp_ics_file("test content")
+    tmp_path = create_temp_sqlite_calendar()
 
     try:
         result = calendar_analyzer.get_calendar_path(tmp_path)
@@ -1625,7 +1419,7 @@ def test_get_calendar_path_with_directory(capsys) -> None:
 def test_get_calendar_path_nonexistent_file(capsys) -> None:
     """Test get_calendar_path with a nonexistent file."""
     # Use a more secure temporary path that doesn't exist
-    nonexistent_path = create_temp_dummy_file("_nonexistent.ics")
+    nonexistent_path = create_temp_dummy_file("_nonexistent.sqlitedb")
     # Remove the file to make it nonexistent but keep the secure path
     Path(nonexistent_path).unlink()
 
@@ -1662,8 +1456,8 @@ def test_get_calendar_path_auto_discovery_with_files(mock_home, capsys) -> None:
         documents_dir.mkdir()
 
         # Create calendar files with different timestamps
-        old_calendar = documents_dir / "old_calendar.ics"
-        new_calendar = documents_dir / "new_calendar.ics"
+        old_calendar = documents_dir / "old_calendar.olm"
+        new_calendar = documents_dir / "new_calendar.olm"
 
         old_calendar.write_text("old calendar content")
         new_calendar.write_text("new calendar content")
@@ -1758,12 +1552,12 @@ def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys)
         documents_dir.mkdir()
 
         # Create different types of calendar files
-        ics_file = documents_dir / "calendar.ics"
+        pst_file = documents_dir / "calendar.pst"
         icbu_file = library_dir / "backup.icbu"
         sqlite_file = library_dir / "calendar.sqlitedb"
         olm_file = documents_dir / "calendar.olm"
 
-        ics_file.write_text("ics content")
+        pst_file.write_text("pst content")
         icbu_file.write_text("icbu content")
         sqlite_file.write_text("sqlite content")
         olm_file.write_text("olm content")
@@ -1772,7 +1566,7 @@ def test_get_calendar_path_auto_discovery_multiple_file_types(mock_home, capsys)
 
         # Should find one of the files (the most recent one)
         assert result.exists()
-        assert result.suffix in [".ics", ".icbu", ".sqlitedb", ".olm"]
+        assert result.suffix in [".icbu", ".sqlitedb", ".olm", ".pst"]
 
         out = capsys.readouterr().out
         # The function prints found files per directory, not total
@@ -1792,7 +1586,7 @@ def test_get_calendar_path_auto_discovery_many_files(mock_home, capsys) -> None:
 
         # Create 7 calendar files
         for i in range(7):
-            calendar_file = documents_dir / f"calendar_{i}.ics"
+            calendar_file = documents_dir / f"calendar_{i}.olm"
             calendar_file.write_text(f"calendar {i} content")
 
         result = calendar_analyzer.get_calendar_path()
@@ -1816,7 +1610,7 @@ def test_get_calendar_path_auto_discovery_subdirectories(mock_home, capsys) -> N
         nested_dir.mkdir(parents=True)
 
         # Create calendar file in nested directory
-        nested_calendar = nested_dir / "nested_calendar.ics"
+        nested_calendar = nested_dir / "nested_calendar.olm"
         nested_calendar.write_text("nested calendar content")
 
         result = calendar_analyzer.get_calendar_path()
@@ -2526,87 +2320,6 @@ def test_analyze_calendar_sqlite_read_error(capsys) -> None:
         assert "Error reading SQLite calendar:" in capsys.readouterr().out
 
 
-def test_analyze_calendar_icbu_with_ics_fallback(capsys) -> None:
-    """Test ICBU file handling with ICS fallback when no SQLite."""
-    # Create ICS content
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:ICBU Test Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        icbu_path = Path(tmp_dir) / "backup.icbu"
-        icbu_path.mkdir()
-
-        # Create ICS file inside ICBU (no SQLite)
-        ics_path = icbu_path / "calendar.ics"
-        ics_path.write_text(ics_content)
-
-        meetings, stats = analysis_result(
-            calendar_analyzer.analyze_calendar(
-                icbu_path,
-                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-            )
-        )
-
-        assert stats["total_meetings"] == 1
-        assert meetings[0]["summary"] == "ICBU Test Meeting"
-
-        out = capsys.readouterr().out
-        assert f"Found ICS file in ICBU backup: {ics_path}" in out
-
-
-def test_analyze_calendar_icbu_uses_sorted_ics_fallback(capsys) -> None:
-    """Test ICBU fallback chooses a deterministic ICS file."""
-    first_ics = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:First ICS Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-    second_ics = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Second ICS Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        icbu_path = Path(tmp_dir) / "backup.icbu"
-        icbu_path.mkdir()
-        selected_ics_path = icbu_path / "a-calendar.ics"
-        selected_ics_path.write_text(first_ics)
-        (icbu_path / "z-calendar.ics").write_text(second_ics)
-
-        meetings, stats = analysis_result(
-            calendar_analyzer.analyze_calendar(
-                icbu_path,
-                datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-                datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-            )
-        )
-
-        assert stats["total_meetings"] == 1
-        assert meetings[0]["summary"] == "First ICS Meeting"
-        out = capsys.readouterr().out
-        assert f"Found ICS file in ICBU backup: {selected_ics_path}" in out
-
-
 def test_analyze_calendar_icbu_no_calendar_data(capsys) -> None:
     """Test ICBU file handling when no calendar data is found."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2622,7 +2335,7 @@ def test_analyze_calendar_icbu_no_calendar_data(capsys) -> None:
 
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
-        assert f"Error: Could not find calendar data (SQLite or ICS) in {icbu_path}" in out
+        assert f"Error: Could not find Calendar.sqlitedb in ICBU backup: {icbu_path}" in out
         assert "Contents of ICBU directory:" in out
         assert "other_file.txt" in out
         assert "metadata.plist" in out
@@ -2644,228 +2357,336 @@ def test_analyze_calendar_icbu_directory_listing_error(capsys) -> None:
             assert "Error listing directory contents: Permission denied" in out
 
 
-def test_analyze_calendar_with_malformed_ics(capsys) -> None:
-    """Test analyze_calendar with malformed ICS content."""
-    malformed_ics = "This is not valid ICS content"
-
-    tmp_path = create_temp_ics_file(malformed_ics)
-
-    with pytest.raises(SystemExit) as exc_info:
-        calendar_analyzer.analyze_calendar(Path(tmp_path))
-
-    assert exc_info.value.code == 1
-    assert "Error parsing calendar file:" in capsys.readouterr().out
-
-    # Clean up
-    Path(tmp_path).unlink()
-
-
-def test_analyze_calendar_rejects_pst_files(capsys, tmp_path: Path) -> None:
-    """Test PST files fail with intentional calendar-only export guidance."""
+def test_analyze_calendar_requires_windows_for_pst_import(capsys, tmp_path: Path) -> None:
+    """Test PST files are accepted but require Windows classic Outlook."""
     pst_path = tmp_path / "calendar.pst"
     pst_path.write_bytes(b"not an Outlook calendar export")
 
-    with pytest.raises(SystemExit) as exc_info:
+    with patch.object(calendar_analyzer.sys, "platform", "darwin"), pytest.raises(SystemExit) as exc_info:
         calendar_analyzer.import_calendar_meetings(pst_path)
 
     assert exc_info.value.code == 1
-    assert "Outlook PST files are intentionally unsupported" in capsys.readouterr().out
+    assert (
+        "Outlook PST import is only available on Windows with classic Microsoft Outlook installed"
+        in capsys.readouterr().out
+    )
+
+
+def test_analyze_calendar_rejects_ics_files(capsys, tmp_path: Path) -> None:
+    """Test direct iCal/ICS files are no longer supported."""
+    calendar_path = tmp_path / "calendar.ics"
+    calendar_path.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.import_calendar_meetings(calendar_path)
+
+    assert exc_info.value.code == 1
+    assert "ICS/iCal files are no longer supported" in capsys.readouterr().out
 
 
 def test_analyze_calendar_default_date_range() -> None:
     """Test analyze_calendar with default date ranges (no start/end specified)."""
     # Use a recent date that would be within the default 365-day range
     recent_date = datetime.now(UTC) - timedelta(days=30)  # 30 days ago
-    recent_date_str = recent_date.strftime("%Y%m%dT%H%M%SZ")
+    tmp_path = create_temp_sqlite_calendar([("Recent Meeting", recent_date, recent_date + timedelta(hours=1), 0)])
 
-    ics_content = textwrap.dedent(f"""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:{recent_date_str}
-    DURATION:PT1H
-    SUMMARY:Recent Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
-
-    tmp_path = create_temp_ics_file(ics_content)
-
-    # Test with default date range (past 365 days)
     meetings, stats = analysis_result(calendar_analyzer.analyze_calendar(Path(tmp_path)))
 
-    # Should process the calendar and find the recent meeting
     assert isinstance(stats, dict)
     assert stats["total_meetings"] == 1
     assert stats["total_hours"] == 1.0
     assert meetings[0]["summary"] == "Recent Meeting"
 
-    # Clean up
     Path(tmp_path).unlink()
 
 
-def test_analyze_calendar_with_non_datetime_events() -> None:
-    """Test analyze_calendar with events that have non-datetime start times."""
-    # ICS with all-day event (DATE instead of DATETIME)
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART;VALUE=DATE:20230701
-    SUMMARY:All Day Event
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT1H
-    SUMMARY:Timed Event
-    END:VEVENT
-    END:VCALENDAR
-    """)
+class OutlookItems:
+    """Minimal Outlook Items collection test double."""
 
-    tmp_path = create_temp_ics_file(ics_content)
+    def __init__(self, items: list[object]) -> None:
+        """Store fake Outlook items."""
+        self._items = items
+        self.Count = len(items)
+        self.IncludeRecurrences = False
 
-    meetings, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            Path(tmp_path),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
-    )
+    def Sort(self, _field: str) -> None:  # noqa: N802
+        """Pretend to sort Outlook appointments."""
 
-    # Should only process the datetime event, not the all-day event
-    assert stats["total_meetings"] == 1
-    assert meetings[0]["summary"] == "Timed Event"
-
-    # Clean up
-    Path(tmp_path).unlink()
+    def Item(self, index: int) -> object:  # noqa: N802
+        """Return a one-indexed Outlook item."""
+        return self._items[index - 1]
 
 
-def test_analyze_calendar_duration_parsing_edge_cases() -> None:
-    """Test various duration parsing edge cases."""
-    # Test various duration formats that might cause issues
-    ics_content = textwrap.dedent("""
-    BEGIN:VCALENDAR
-    VERSION:2.0
-    BEGIN:VEVENT
-    DTSTART:20230701T100000Z
-    DURATION:PT30M
-    SUMMARY:30 Minute Meeting
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230701T120000Z
-    DURATION:P1D
-    SUMMARY:All Day Event with Duration
-    END:VEVENT
-    BEGIN:VEVENT
-    DTSTART:20230701T140000Z
-    DURATION:INVALID_DURATION
-    SUMMARY:Invalid Duration Meeting
-    END:VEVENT
-    END:VCALENDAR
-    """)
+class OutlookAppointment:
+    """Minimal Outlook appointment item test double."""
 
-    tmp_path = create_temp_ics_file(ics_content)
+    Class = calendar_analyzer.OUTLOOK_APPOINTMENT_CLASS
+    MessageClass = "IPM.Appointment"
 
-    meetings, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            Path(tmp_path),
-            datetime(2023, 6, 30, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
-    )
-
-    # Should process timed meetings, with fallback durations where needed
-    assert stats["total_meetings"] == 2
-
-    # Find each meeting and check duration handling
-    meeting_summaries = [m["summary"] for m in meetings]
-    assert "30 Minute Meeting" in meeting_summaries
-    assert "All Day Event with Duration" not in meeting_summaries
-    assert "Invalid Duration Meeting" in meeting_summaries
-
-    # Clean up
-    Path(tmp_path).unlink()
+    def __init__(
+        self,
+        subject: str,
+        start: datetime,
+        end: datetime,
+        *,
+        all_day: bool = False,
+        busy_status: int = 2,
+    ) -> None:
+        """Store fake Outlook appointment fields."""
+        self.Subject = subject
+        self.Start = start
+        self.End = end
+        self.AllDayEvent = all_day
+        self.BusyStatus = busy_status
 
 
-class CalendarProperty:
-    """Minimal calendar property wrapper for fake event values."""
+class UnreadableOutlookItems:
+    """Outlook Items test double that fails if a non-calendar folder is read."""
 
-    def __init__(self, value: object) -> None:
-        """Store a value on the same attribute used by icalendar properties."""
-        self.dt = value
+    @property
+    def Count(self) -> int:  # noqa: N802
+        """Fail when code tries to enumerate non-calendar folder items."""
+        message = "non-calendar folder items should not be enumerated"
+        raise AssertionError(message)
 
+    def Sort(self, _field: str) -> None:  # noqa: N802
+        """Fail when code tries to sort non-calendar folder items."""
+        message = "non-calendar folder items should not be sorted"
+        raise AssertionError(message)
 
-class CalendarEvent:
-    """Minimal event object that supports the calendar analyzer event API."""
-
-    def __init__(self, start: datetime, summary: str, duration: object) -> None:
-        """Create a fake event with start, summary, and duration fields."""
-        self.values = {
-            "dtstart": CalendarProperty(start),
-            "duration": duration,
-            "summary": summary,
-        }
-
-    def get(self, key: str, default: object = None) -> object:
-        """Return the requested fake event field."""
-        return self.values.get(key, default)
+    def Item(self, _index: int) -> object:  # noqa: N802
+        """Fail when code tries to fetch non-calendar folder items."""
+        message = "non-calendar folder items should not be read"
+        raise AssertionError(message)
 
 
-class CalendarDuration:
-    """Minimal duration object whose string representation matches ICS syntax."""
+class OutlookFolder:
+    """Minimal Outlook folder tree test double."""
 
-    def __init__(self, value: str) -> None:
-        """Store the duration text."""
-        self.value = value
-
-    def __str__(self) -> str:
-        """Return the ICS-style duration text."""
-        return self.value
-
-
-class CalendarWithEvents:
-    """Minimal calendar object that returns fake VEVENT entries."""
-
-    def __init__(self, events: list[CalendarEvent]) -> None:
-        """Store fake events for later traversal."""
-        self.events = events
-
-    def walk(self, component: str) -> list[CalendarEvent]:
-        """Return fake VEVENT entries."""
-        assert component == "VEVENT"
-        return self.events
+    def __init__(
+        self,
+        items: list[object],
+        folders: list[object] | None = None,
+        *,
+        default_item_type: int = calendar_analyzer.OUTLOOK_APPOINTMENT_ITEM_TYPE,
+    ) -> None:
+        """Store fake Outlook folder contents."""
+        self.Items: object = OutlookItems(items)
+        self.Folders = OutlookItems(folders or [])
+        self.DefaultItemType = default_item_type
 
 
-def test_analyze_calendar_duration_timedelta_and_string_branches(monkeypatch) -> None:
-    """Test public calendar analysis for timedelta and string duration inputs."""
-    start = datetime(2023, 7, 1, 17, 0, tzinfo=UTC)
-    calendar = CalendarWithEvents(
+class OutlookStore:
+    """Minimal Outlook Store test double."""
+
+    def __init__(self, file_path: str, root_folder: OutlookFolder) -> None:
+        """Store fake Outlook store fields."""
+        self.FilePath = file_path
+        self.StoreID = f"store:{file_path}"
+        self._root_folder = root_folder
+
+    def GetRootFolder(self) -> OutlookFolder:  # noqa: N802
+        """Return the fake root folder."""
+        return self._root_folder
+
+
+class OutlookStores:
+    """Minimal Outlook Stores collection test double."""
+
+    def __init__(self) -> None:
+        """Create an empty store collection."""
+        self._stores: list[OutlookStore] = []
+
+    @property
+    def Count(self) -> int:  # noqa: N802
+        """Return the Outlook-style store count."""
+        return len(self._stores)
+
+    def Item(self, index: int) -> OutlookStore:  # noqa: N802
+        """Return a one-indexed Outlook store."""
+        return self._stores[index - 1]
+
+    def append(self, store: OutlookStore) -> None:
+        """Add a fake Outlook store."""
+        self._stores.append(store)
+
+    def remove_root(self, root_folder: OutlookFolder) -> None:
+        """Remove the store with the given root folder."""
+        self._stores = [store for store in self._stores if store.GetRootFolder() is not root_folder]
+
+
+class OutlookNamespace:
+    """Minimal Outlook MAPI namespace test double."""
+
+    def __init__(self, root_folder: OutlookFolder, mounted_file_path: str) -> None:
+        """Store fake namespace state."""
+        self.Stores = OutlookStores()
+        self._root_folder = root_folder
+        self._mounted_file_path = mounted_file_path
+        self.added_paths: list[str] = []
+        self.removed_roots: list[OutlookFolder] = []
+
+    def AddStore(self, file_path: str) -> None:  # noqa: N802
+        """Pretend to mount a PST file."""
+        self.added_paths.append(file_path)
+        self.Stores.append(OutlookStore(self._mounted_file_path, self._root_folder))
+
+    def RemoveStore(self, root_folder: OutlookFolder) -> None:  # noqa: N802
+        """Pretend to detach a PST file."""
+        self.removed_roots.append(root_folder)
+        self.Stores.remove_root(root_folder)
+
+
+class OutlookApplication:
+    """Minimal Outlook application test double."""
+
+    def __init__(self, namespace: OutlookNamespace) -> None:
+        """Store the fake namespace."""
+        self._namespace = namespace
+
+    def GetNamespace(self, name: str) -> OutlookNamespace:  # noqa: N802
+        """Return the fake MAPI namespace."""
+        assert name == "MAPI"
+        return self._namespace
+
+
+class Win32Client:
+    """Minimal win32com.client module test double."""
+
+    def __init__(self, namespace: OutlookNamespace) -> None:
+        """Store the fake namespace."""
+        self._namespace = namespace
+
+    def Dispatch(self, name: str) -> OutlookApplication:  # noqa: N802
+        """Return the fake Outlook application."""
+        assert name == "Outlook.Application"
+        return OutlookApplication(self._namespace)
+
+
+def test_meetings_from_outlook_folder_filters_calendar_appointments() -> None:
+    """Test PST extraction keeps only timed appointment items."""
+    root = OutlookFolder(
         [
-            CalendarEvent(start, "Timedelta Duration", timedelta(hours=2)),
-            CalendarEvent(start, "String Hour Duration", CalendarDuration("PT3H")),
-            CalendarEvent(start, "Fallback String Duration", CalendarDuration("PT30M")),
-            CalendarEvent(start, "Malformed Hour Duration", CalendarDuration("PTXH")),
-            CalendarEvent(start, "Negative Timedelta Duration", timedelta(hours=-2)),
-            CalendarEvent(start, "Negative String Duration", CalendarDuration("PT-3H")),
+            OutlookAppointment(
+                "Imported PST Meeting",
+                datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 1, 11, 30, tzinfo=calendar_analyzer.PACIFIC),
+            ),
+            OutlookAppointment(
+                "All Day PST Event",
+                datetime(2023, 7, 1, 0, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 2, 0, 0, tzinfo=calendar_analyzer.PACIFIC),
+                all_day=True,
+            ),
+            OutlookAppointment(
+                "Free PST Hold",
+                datetime(2023, 7, 1, 12, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 1, 13, 0, tzinfo=calendar_analyzer.PACIFIC),
+                busy_status=0,
+            ),
+            object(),
         ]
     )
-    monkeypatch.setattr("calendar_analyzer._read_ics_calendar", lambda _: calendar)
 
-    meetings, stats = analysis_result(
-        calendar_analyzer.analyze_calendar(
-            Path("fake.ics"),
-            datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
-            datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
-        )
+    meetings = calendar_analyzer._meetings_from_outlook_folder(root)  # noqa: SLF001
+
+    assert [meeting["summary"] for meeting in meetings] == ["Imported PST Meeting"]
+    assert meetings[0]["duration_hours"] == 1.5
+
+
+def test_meetings_from_outlook_folder_skips_non_calendar_folders() -> None:
+    """Test PST extraction does not enumerate mail/contact/task folder items."""
+    non_calendar_folder = OutlookFolder(
+        [],
+        default_item_type=0,
     )
+    non_calendar_folder.Items = UnreadableOutlookItems()
+    calendar_folder = OutlookFolder(
+        [
+            OutlookAppointment(
+                "Calendar Child Meeting",
+                datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC),
+            )
+        ]
+    )
+    root = OutlookFolder([], [non_calendar_folder, calendar_folder], default_item_type=0)
 
-    durations_by_title = {meeting["summary"]: meeting["duration_hours"] for meeting in meetings}
-    assert durations_by_title == {
-        "Timedelta Duration": 2.0,
-        "String Hour Duration": 3.0,
-        "Fallback String Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
-        "Malformed Hour Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
-        "Negative Timedelta Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
-        "Negative String Duration": calendar_analyzer.DEFAULT_DURATION_HOURS,
-    }
-    assert stats == {"total_meetings": 6, "total_hours": 9.0}
+    meetings = calendar_analyzer._meetings_from_outlook_folder(root)  # noqa: SLF001
+
+    assert [meeting["summary"] for meeting in meetings] == ["Calendar Child Meeting"]
+
+
+def test_import_calendar_meetings_imports_pst_via_outlook_and_detaches_store(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Test the public PST importer uses Outlook COM and removes its mounted store."""
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"pst")
+    root_folder = OutlookFolder(
+        [
+            OutlookAppointment(
+                "Public PST Import",
+                datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC),
+            )
+        ]
+    )
+    namespace = OutlookNamespace(root_folder, str(tmp_path / "outlook-normalized-calendar.pst"))
+
+    def import_module(name: str) -> object:
+        if name == "win32com.client":
+            return Win32Client(namespace)
+        if name == "pywintypes":
+            raise ImportError
+        return importlib.import_module(name)
+
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    meetings = calendar_analyzer.import_calendar_meetings(pst_path)
+
+    assert [meeting["summary"] for meeting in meetings] == ["Public PST Import"]
+    assert namespace.added_paths == [str(pst_path)]
+    assert namespace.removed_roots == [root_folder]
+    assert namespace.Stores.Count == 0
+    assert isinstance(root_folder.Items, OutlookItems)
+    assert root_folder.Items.IncludeRecurrences is False
+
+
+def test_import_calendar_meetings_uses_existing_pst_store_without_detaching(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Test the PST importer preserves a store the user already had mounted."""
+    pst_path = tmp_path / "calendar.pst"
+    pst_path.write_bytes(b"pst")
+    root_folder = OutlookFolder(
+        [
+            OutlookAppointment(
+                "Already Mounted PST Import",
+                datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+                datetime(2023, 7, 1, 11, 0, tzinfo=calendar_analyzer.PACIFIC),
+            )
+        ]
+    )
+    namespace = OutlookNamespace(root_folder, str(tmp_path / "unused-mounted-path.pst"))
+    namespace.Stores.append(OutlookStore(str(pst_path.resolve()), root_folder))
+
+    def import_module(name: str) -> object:
+        if name == "win32com.client":
+            return Win32Client(namespace)
+        if name == "pywintypes":
+            raise ImportError
+        return importlib.import_module(name)
+
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.importlib, "import_module", import_module)
+
+    meetings = calendar_analyzer.import_calendar_meetings(pst_path)
+
+    assert [meeting["summary"] for meeting in meetings] == ["Already Mounted PST Import"]
+    assert namespace.added_paths == []
+    assert namespace.removed_roots == []
+    assert namespace.Stores.Count == 1
