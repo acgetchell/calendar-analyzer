@@ -75,8 +75,8 @@ PATH=/opt/homebrew/bin:$PATH uv run pytest
 - Main module: `calendar_analyzer.py`
 - Tests: `tests/test_calendar_analyzer.py`
 - Security rules: `semgrep.yaml`, CodeQL workflow
-- Supported calendar inputs: Apple `.ics`, `.icbu`, `.sqlitedb`; Outlook `.olm`,
-  `.ics`, and `.csv`
+- Supported calendar inputs: Apple `.icbu`, `.sqlitedb`; Outlook `.olm`, `.pst`,
+  and explicit `.csv`
 
 ## Design Principles
 

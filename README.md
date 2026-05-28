@@ -10,9 +10,10 @@ A small local script that analyzes Apple Calendar and Outlook calendar exports a
 ## Features
 
 - Analyzes calendar events from a specified date range (defaults to past year)
-- Reads Apple Calendar `.ics`, `.icbu`, and `.sqlitedb` exports
-- Reads Microsoft Outlook for Mac `.olm` archives and Outlook `.ics` or `.csv` exports
-- Does not read Outlook `.PST` files by design; use `.ics` for calendar-only exports
+- Reads Apple Calendar `.icbu` archives and `.sqlitedb` calendar databases
+- Reads Microsoft Outlook for Mac `.olm` archives and explicit Outlook `.csv` calendar exports
+- Reads Microsoft Outlook for Windows `.pst` exports on Windows with classic Outlook installed
+- Does not read iCal/`.ics` exports because they are too lossy for this analyzer
 - Saves normalized meeting data as a Polars-readable Parquet cache for faster repeated reports
 - Provides statistics on:
   - Total number of meetings
@@ -33,7 +34,7 @@ uv tool install .
 Export a calendar file, then run:
 
 ```bash
-calendar-analyzer --calendar ~/Documents/your-calendar.ics
+calendar-analyzer --calendar ~/Documents/your-calendar.icbu
 ```
 
 ## AI Analysis And Privacy
@@ -60,8 +61,11 @@ the prompt is saved to `calendar-prompt.txt`.
 
 1. Open Calendar on your Mac.
 2. Select the calendar you want to analyze.
-3. Choose File > Export > Export.
-4. Save the `.ics` file.
+3. Choose File > Export > Calendar Archive.
+4. Save the `.icbu` backup.
+
+Use the Calendar Archive (`.icbu`) option rather than the single-calendar iCal (`.ics`) export. The analyzer reads the
+SQLite calendar data inside the archive; direct iCal files are not supported.
 
 ### Microsoft Outlook for Mac
 
@@ -73,16 +77,20 @@ the prompt is saved to `calendar-prompt.txt`.
 
 ### Microsoft Outlook for Windows
 
-Export the calendar as an `.ics` file:
+Use classic Microsoft Outlook for Windows to export an Outlook Data File (`.pst`) with Calendar included:
 
-1. Open Microsoft Outlook for Windows and switch to Calendar.
-2. Select the calendar you want to analyze.
-3. Use File > Save Calendar, or the calendar sharing/export option available in your Outlook version.
-4. Choose an `.ics` calendar file and save it somewhere easy to find, such as Documents.
+1. Open classic Microsoft Outlook for Windows.
+2. Choose File > Open & Export > Import/Export.
+3. Choose Export to a file > Outlook Data File (`.pst`).
+4. Select the account or Calendar folder you want to analyze, and include subfolders when appropriate.
+5. Save the `.pst` somewhere easy to find, such as Documents.
 
-Do not export a `.PST` file for this tool. The analyzer intentionally does not read PST files because a PST export can
-include mail, contacts, tasks, and other mailbox data, not just calendar information. Use an `.ics` calendar export
-instead.
+New Outlook for Windows has limited PST support. It can export PST files in some versions, but Microsoft currently says
+calendar and contact items saved in PST files are not available in New Outlook. Use classic Outlook for calendar PST
+exports.
+
+The analyzer accepts a `.pst` file on Windows, asks classic Outlook to open it locally, and imports only appointment
+items into the local Parquet cache. Mail, contacts, tasks, and other PST contents are ignored.
 
 Outlook `.csv` calendar exports are also supported when available. CSV files are only imported when you pass
 them explicitly with `--calendar` because generic CSV files are common in Documents and Downloads.
@@ -90,13 +98,13 @@ them explicitly with `--calendar` because generic CSV files are common in Docume
 Run the analyzer with the exported file:
 
 ```bash
-calendar-analyzer --calendar ~/Documents/your-calendar.ics
+calendar-analyzer --calendar ~/Documents/your-calendar.icbu
 ```
 
 On Windows PowerShell:
 
 ```powershell
-calendar-analyzer --calendar "$HOME\Documents\your-calendar.ics"
+calendar-analyzer --calendar "$HOME\Documents\your-calendar.pst"
 ```
 
 After the first import, the analyzer saves a Parquet cache. Later reports, including AI prompts, read from that cache
@@ -125,7 +133,7 @@ calendar-analyzer --calendar /path/to/your/calendar.olm --import
 
 # Force re-importing a specific calendar into a specific saved cache
 calendar-analyzer \
-  --calendar "/path/to/your/calendar.ics" \
+  --calendar "/path/to/your/calendar.icbu" \
   --dataframe ~/.cache/calendar-analyzer/meetings.parquet \
   --import
 
@@ -184,7 +192,7 @@ uv tool install .
 Then run:
 
 ```bash
-calendar-analyzer --calendar /path/to/your/calendar.ics
+calendar-analyzer --calendar /path/to/your/calendar.icbu
 ```
 
 `uv tool install .` reads `pyproject.toml`, uses Python 3.11 or newer, and installs the runtime packages needed by the
@@ -194,7 +202,7 @@ analyzer. If `uv` says the tool directory is not on your `PATH`, run `uv tool up
 For a one-off run without installing the command, use:
 
 ```bash
-uv run --no-dev calendar-analyzer --calendar /path/to/your/calendar.ics
+uv run --no-dev calendar-analyzer --calendar /path/to/your/calendar.icbu
 ```
 
 `just` is not needed for running reports. It is part of the development workflow below.
