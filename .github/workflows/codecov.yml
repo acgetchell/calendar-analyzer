@@ -35,12 +35,12 @@ jobs:
           enable-cache: true
 
       - name: Install just
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: just@${{ env.JUST_VERSION }}
 
       - name: Install shell script tools
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: shellcheck,shfmt
 

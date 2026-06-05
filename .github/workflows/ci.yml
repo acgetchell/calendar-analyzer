@@ -65,32 +65,32 @@ jobs:
           enable-cache: true
 
       - name: Install just
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: just@${{ env.JUST_VERSION }}
 
       - name: Install rumdl
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: rumdl@${{ env.RUMDL_VERSION }}
 
       - name: Install taplo
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: taplo-cli@${{ env.TAPLO_VERSION }}
 
       - name: Install typos-cli
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: typos-cli@${{ env.TYPOS_VERSION }}
 
       - name: Install zizmor
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: zizmor@${{ env.ZIZMOR_VERSION }}
 
       - name: Install shell script tools
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
         with:
           tool: shellcheck,shfmt
 
