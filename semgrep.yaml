@@ -146,6 +146,20 @@ rules:
     pattern: |
       CALENDAR_PATTERNS = (..., "*.csv", ...)
 
+  - id: calendar-analyzer.python.no-type-ignore-comments
+    languages:
+      - regex
+    severity: WARNING
+    message: "Avoid mypy-style # type: ignore comments; keep values type-checkable or use a ty-specific suppression."
+    metadata:
+      category: maintainability
+      rationale: "This repository type-checks with ty, so mypy-style ignores are easy to mistake for enforced suppressions."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+        - "/tests/**/*.py"
+    pattern-regex: '#\s*type:\s*ignore(?:\[[^\]]+\])?'
+
   - id: calendar-analyzer.python.no-raw-calendar-record-debug-print
     languages:
       - python

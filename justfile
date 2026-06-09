@@ -134,7 +134,7 @@ python-sync: _ensure-uv
     uv sync --group dev
 
 python-typecheck: _ensure-uv
-    uv run ty check calendar_analyzer.py tests --error all
+    uv run ty check calendar_analyzer.py tests --error all --python-platform all
 
 script-check: shell-check powershell-check
 
