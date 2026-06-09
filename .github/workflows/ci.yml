@@ -27,6 +27,7 @@ env:
   TYPOS_VERSION: "1.47.2"
   UV_VERSION: "0.11.19"
   ZIZMOR_VERSION: "1.25.2"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   ci:
@@ -68,6 +69,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           toolchain: stable
+          cache: false
 
       - name: Install just
         uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3.0.7
