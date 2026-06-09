@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 env:
-  JUST_VERSION: "1.51.0"
-  UV_VERSION: "0.11.15"
+  JUST_VERSION: "1.52.0"
+  UV_VERSION: "0.11.19"
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   coverage:
@@ -26,7 +27,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -34,15 +35,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: stable
+          cache: false
+
       - name: Install just
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
+        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3.0.7
         with:
           tool: just@${{ env.JUST_VERSION }}
-
-      - name: Install shell script tools
-        uses: taiki-e/install-action@8f531eaecd1898bc3da7d104ad91bee98d1b97bd # v2.79.9
-        with:
-          tool: shellcheck,shfmt
 
       - name: Install PSScriptAnalyzer
         shell: pwsh
@@ -60,3 +62,4 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: true
+          use_pypi: true

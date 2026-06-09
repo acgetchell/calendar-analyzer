@@ -18,8 +18,8 @@ just script-check
 
 `just script-check` runs:
 
-- `shellcheck` on tracked and untracked `*.sh` files.
-- `shfmt -d` on tracked and untracked `*.sh` files to verify formatting.
+- `uv run shellcheck` on tracked and untracked `*.sh` files.
+- `uv run shfmt -d` on tracked and untracked `*.sh` files to verify formatting.
 - `PSScriptAnalyzer` on tracked and untracked `*.ps1` files.
 
 Markdown checks are handled separately by `just markdown-check`, which runs `rumdl check` on tracked Markdown files.
@@ -40,7 +40,7 @@ Shell scripts can be formatted automatically:
 just script-fmt
 ```
 
-`just script-fmt` runs `shfmt -w` on tracked and untracked `*.sh` files. PowerShell scripts are checked with
+`just script-fmt` runs `uv run shfmt -w` on tracked and untracked `*.sh` files. PowerShell scripts are checked with
 `PSScriptAnalyzer`, but this project does not currently apply automatic PowerShell formatting.
 
 ## Direct Tool Commands
@@ -48,8 +48,8 @@ just script-fmt
 The `just` recipes are the preferred interface, but the direct commands are:
 
 ```bash
-shellcheck scripts/setup-macos.sh
-shfmt -d scripts/setup-macos.sh
+uv run shellcheck scripts/setup-macos.sh
+uv run shfmt -d scripts/setup-macos.sh
 ```
 
 ```powershell
@@ -65,8 +65,6 @@ The setup scripts install or verify:
 - `rumdl`
 - `taplo`
 - `typos`
-- `shellcheck`
-- `shfmt`
 - PowerShell (`pwsh`)
 - `zizmor`
 - `PSScriptAnalyzer`

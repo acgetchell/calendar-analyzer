@@ -69,7 +69,7 @@ PATH=/opt/homebrew/bin:$PATH uv run pytest
 
 ## Project Context
 
-- Language: Python 3.11+
+- Language: Python 3.13+
 - Package/dependency manager: `uv`
 - Workflow runner: `just`
 - Main module: `calendar_analyzer.py`
