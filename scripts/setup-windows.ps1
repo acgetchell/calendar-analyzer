@@ -142,8 +142,6 @@ function Install-PSScriptAnalyzer {
 Write-Information "Bootstrapping Calendar Analyzer development tools..."
 Install-Uv
 Install-GitBash
-Install-WingetTool -CommandName "shellcheck" -WingetId "koalaman.shellcheck" -DisplayName "ShellCheck"
-Install-WingetTool -CommandName "shfmt" -WingetId "mvdan.shfmt" -DisplayName "shfmt"
 Install-CargoTool -CommandName "just" -CrateName "just"
 Install-CargoTool -CommandName "rumdl" -CrateName "rumdl"
 Install-CargoTool -CommandName "taplo" -CrateName "taplo-cli"
@@ -151,8 +149,8 @@ Install-CargoTool -CommandName "typos" -CrateName "typos-cli"
 Install-CargoTool -CommandName "zizmor" -CrateName "zizmor"
 Install-PSScriptAnalyzer
 
-Write-Information "Ensuring Python 3.11 is available through uv..."
-uv python install 3.11
+Write-Information "Ensuring Python 3.13 is available through uv..."
+uv python install 3.13
 
 Write-Information "Syncing development dependencies..."
 uv sync --group dev

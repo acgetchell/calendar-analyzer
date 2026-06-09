@@ -195,7 +195,7 @@ Then run:
 calendar-analyzer --calendar /path/to/your/calendar.icbu
 ```
 
-`uv tool install .` reads `pyproject.toml`, uses Python 3.11 or newer, and installs the runtime packages needed by the
+`uv tool install .` reads `pyproject.toml`, uses Python 3.13 or newer, and installs the runtime packages needed by the
 analyzer. If `uv` says the tool directory is not on your `PATH`, run `uv tool update-shell`, restart your shell, and try
 `calendar-analyzer --help`.
 

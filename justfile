@@ -17,8 +17,9 @@ _ensure-rumdl:
 _ensure-shell-tools:
     #!/usr/bin/env bash
     set -euo pipefail
-    command -v shellcheck >/dev/null || { echo "'shellcheck' not found. Install with: brew install shellcheck (macOS) or winget install koalaman.shellcheck (Windows)."; exit 1; }
-    command -v shfmt >/dev/null || { echo "'shfmt' not found. Install with: brew install shfmt (macOS) or winget install mvdan.shfmt (Windows)."; exit 1; }
+    command -v uv >/dev/null || { echo "'uv' not found. Install with: brew install uv"; exit 1; }
+    uv run shellcheck --version >/dev/null
+    uv run shfmt --version >/dev/null
 
 _ensure-taplo:
     #!/usr/bin/env bash
@@ -98,7 +99,12 @@ markdown-fix: _ensure-rumdl
 markdown-lint: markdown-check
 
 pip-audit: _ensure-uv
-    uv run pip-audit --skip-editable
+    #!/usr/bin/env bash
+    set -euo pipefail
+    requirements="$(mktemp "${TMPDIR:-/tmp}/calendar-analyzer-runtime.XXXXXX")"
+    trap 'rm -f "$requirements"' EXIT
+    uv export --locked --no-dev --no-emit-project --format requirements.txt --output-file "$requirements"
+    uv run pip-audit --requirement "$requirements" --no-deps --disable-pip
 
 powershell-check: _ensure-powershell-tools
     #!/usr/bin/env bash
@@ -146,8 +152,8 @@ setup: setup-tools
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Setting up Calendar Analyzer development environment..."
-    echo "Ensuring Python 3.11 is available through uv..."
-    uv python install 3.11
+    echo "Ensuring Python 3.13 is available through uv..."
+    uv python install 3.13
     echo "Syncing development dependencies..."
     uv sync --group dev
     echo "Setup complete. Run 'just ci' when ready."
@@ -246,8 +252,6 @@ setup-tools:
     ensure_brew_or_cargo_tool taplo taplo taplo-cli
     ensure_brew_or_cargo_tool typos typos-cli typos-cli
     ensure_brew_or_cargo_tool zizmor zizmor zizmor
-    ensure_system_tool shellcheck shellcheck "Install with: brew install shellcheck (macOS) or winget install koalaman.shellcheck (Windows)."
-    ensure_system_tool shfmt shfmt "Install with: brew install shfmt (macOS) or winget install mvdan.shfmt (Windows)."
     ensure_system_tool pwsh powershell/tap/powershell "Install PowerShell: https://learn.microsoft.com/powershell/"
 
     echo "Ensuring PSScriptAnalyzer is available..."
@@ -256,7 +260,7 @@ setup-tools:
     echo ""
     echo "Verifying required commands are available..."
     missing=0
-    cmds=(uv just rumdl taplo typos shellcheck shfmt pwsh zizmor)
+    cmds=(uv just rumdl taplo typos pwsh zizmor)
     for cmd in "${cmds[@]}"; do
         if have "$cmd"; then
             echo "  ok: $cmd"
@@ -285,8 +289,8 @@ shell-check: _ensure-shell-tools
         files+=("$file")
     done < <(git ls-files -z '*.sh'; git ls-files -z --others --exclude-standard '*.sh')
     if [ "${#files[@]}" -gt 0 ]; then
-        shellcheck "${files[@]}"
-        shfmt -d "${files[@]}"
+        printf '%s\0' "${files[@]}" | xargs -0 -n4 uv run shellcheck -x
+        printf '%s\0' "${files[@]}" | xargs -0 uv run shfmt -d
     else
         echo "No shell scripts found to check."
     fi
@@ -299,7 +303,7 @@ shell-fmt: _ensure-shell-tools
         files+=("$file")
     done < <(git ls-files -z '*.sh'; git ls-files -z --others --exclude-standard '*.sh')
     if [ "${#files[@]}" -gt 0 ]; then
-        shfmt -w "${files[@]}"
+        printf '%s\0' "${files[@]}" | xargs -0 uv run shfmt -w
     else
         echo "No shell scripts found to format."
     fi
