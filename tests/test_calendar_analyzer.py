@@ -1027,6 +1027,125 @@ def test_main_exits_for_saved_dataframe_missing_columns(monkeypatch, capsys, tmp
     assert "No calendar files found" not in out
 
 
+def test_main_exits_for_saved_dataframe_with_inconsistent_meeting_row(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test cache-only runs reject rows whose derived meeting fields disagree."""
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    pl.read_parquet(dataframe_path).with_columns(
+        pl.lit(datetime(2023, 7, 2, tzinfo=UTC).date()).cast(pl.Date).alias("date")
+    ).write_parquet(dataframe_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame: meeting row 1 date" in out
+    assert "does not match start" in out
+    assert "No calendar files found" not in out
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda frame: frame.with_columns(pl.lit("").alias("summary")),
+            "invalid summary: ''",
+        ),
+        (
+            lambda frame: frame.with_columns(pl.lit(0.0).alias("duration_hours")),
+            "invalid duration_hours: 0.0",
+        ),
+        (
+            lambda frame: frame.with_columns(pl.lit(float("nan")).alias("duration_hours")),
+            "invalid duration_hours: nan",
+        ),
+        (
+            lambda frame: frame.with_columns(
+                pl.lit(datetime(2023, 7, 1, 11, 0, tzinfo=UTC).time()).cast(pl.Time).alias("time")
+            ),
+            "time datetime.time(11, 0) does not match start",
+        ),
+    ],
+)
+def test_main_exits_for_saved_dataframe_with_invalid_meeting_values(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    """Test cache-only runs reject invalid row values beyond schema shape."""
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    mutation(pl.read_parquet(dataframe_path)).write_parquet(dataframe_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame: meeting row 1" in out
+    assert message in out
+    assert "No calendar files found" not in out
+
+
 def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test failed cache rewrites keep the previous readable DataFrame."""
     calendar_path = tmp_path / "calendar.sqlitedb"
@@ -1071,6 +1190,69 @@ def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatc
     assert "Error saving Polars DataFrame: simulated metadata failure" in capsys.readouterr().out
     rows = list(pl.read_parquet(dataframe_path).iter_rows(named=True))
     assert [row["summary"] for row in rows] == ["Original Cache"]
+
+
+def test_write_meetings_dataframe_restores_cache_when_metadata_replace_fails(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test cache rewrites restore old files if sidecar replacement fails."""
+    calendar_path = tmp_path / "calendar.sqlitedb"
+    dataframe_path = tmp_path / "meetings.parquet"
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Original Cache",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    original_metadata = metadata_path.read_text(encoding="utf-8")
+    calendar_path.unlink()
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Replacement Cache",
+                    datetime(2023, 7, 2, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 2, 19, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
+    real_replace = Path.replace
+    failed_metadata_replace = False
+
+    def fail_metadata_replace(self: Path, target: str | Path) -> Path:
+        nonlocal failed_metadata_replace
+        if (
+            not failed_metadata_replace
+            and self.name.startswith(f".{metadata_path.name}.")
+            and Path(target) == metadata_path
+        ):
+            failed_metadata_replace = True
+            message = "simulated metadata replace failure"
+            raise OSError(message)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_metadata_replace)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+
+    assert exc_info.value.code == 1
+    assert "Error saving Polars DataFrame: simulated metadata replace failure" in capsys.readouterr().out
+    rows = list(pl.read_parquet(dataframe_path).iter_rows(named=True))
+    assert [row["summary"] for row in rows] == ["Original Cache"]
+    assert metadata_path.read_text(encoding="utf-8") == original_metadata
 
 
 def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path: Path) -> None:
@@ -1339,6 +1521,59 @@ def test_generate_summary_shows_imported_coverage_and_query_range() -> None:
     assert "Query Date Range:" in result
     assert "- From: July 01, 2023" in result
     assert "- To:   July 31, 2023" in result
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"num_titles": 0}, "num_titles must be positive"),
+        ({"num_times": 0}, "num_times must be positive"),
+        (
+            {
+                "period_start": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+                "period_end": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            },
+            "period_end cannot be before period_start",
+        ),
+        (
+            {
+                "data_start": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "data_end": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            },
+            "data_end cannot be before data_start",
+        ),
+    ],
+)
+def test_summary_options_reject_invalid_invariants(options: dict[str, Any], message: str) -> None:
+    """Test summary display options carry validated invariants."""
+    with pytest.raises(ValueError, match=message):
+        calendar_analyzer.SummaryOptions(**options)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"summary": "", "duration_hours": 1.0},
+            "Meeting summary must be a non-empty string",
+        ),
+        (
+            {"summary": "Bad Duration", "duration_hours": 0.0},
+            "Meeting duration_hours must be positive and finite",
+        ),
+        (
+            {"summary": "Bad Duration", "duration_hours": float("nan")},
+            "Meeting duration_hours must be positive and finite",
+        ),
+    ],
+)
+def test_meeting_rejects_invalid_invariants(kwargs: dict[str, Any], message: str) -> None:
+    """Test validated meeting objects cannot store invalid domain values."""
+    with pytest.raises(ValueError, match=message):
+        calendar_analyzer.Meeting(
+            start=datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+            **kwargs,
+        )
 
 
 def test_analyze_calendar_date_filtering() -> None:
@@ -2305,6 +2540,27 @@ def test_analyze_calendar_defaults_missing_sqlite_summary() -> None:
 
         assert stats == {"total_meetings": 1, "total_hours": 1.0}
         assert meetings[0]["summary"] == "No Title"
+
+
+def test_analyze_calendar_sqlite_reports_malformed_date_rows(capsys, tmp_path: Path) -> None:
+    """Test malformed Apple SQLite date fields produce a user-facing parse error."""
+    sqlite_path = tmp_path / "calendar.sqlitedb"
+    with closing(sqlite3.connect(sqlite_path)) as conn:
+        conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+        conn.execute(
+            "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
+            ("Broken Date Meeting", None, 1),
+        )
+        conn.commit()
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.analyze_calendar(sqlite_path)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing SQLite calendar:" in out
+    assert "Broken Date Meeting" in out
+    assert "invalid start_date: None" in out
 
 
 def test_analyze_calendar_sqlite_read_error(capsys) -> None:

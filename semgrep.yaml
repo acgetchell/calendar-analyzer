@@ -113,6 +113,39 @@ rules:
       with sqlite3.connect(...) as $CONN:
           ...
 
+  - id: calendar-analyzer.python.no-direct-system-exit
+    languages:
+      - python
+    severity: WARNING
+    message: "Use raise_system_exit() so CLI failures keep a consistent exit status and user-facing path."
+    metadata:
+      category: maintainability
+      rationale: "A single exit helper keeps normal user errors out of traceback-prone or inconsistent control flow."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+    patterns:
+      - pattern-either:
+          - pattern: raise SystemExit(...)
+          - pattern: sys.exit(...)
+      - pattern-not-inside: |
+          def raise_system_exit(...):
+              ...
+
+  - id: calendar-analyzer.python.no-csv-auto-discovery
+    languages:
+      - python
+    severity: WARNING
+    message: "Do not add CSV files to automatic calendar discovery; CSV is supported only when explicitly requested."
+    metadata:
+      category: privacy
+      rationale: "Generic CSV files are common in Documents and Downloads, so auto-discovering them risks reading unrelated local data."
+    paths:
+      include:
+        - "/calendar_analyzer.py"
+    pattern: |
+      CALENDAR_PATTERNS = (..., "*.csv", ...)
+
   - id: calendar-analyzer.python.no-raw-calendar-record-debug-print
     languages:
       - python
