@@ -91,19 +91,24 @@ class Meeting:
         return convert_to_pacific(self.start).time()
 
     @overload
-    def __getitem__(self, key: Literal["start"]) -> datetime: ...
+    def __getitem__(self, key: Literal["start"]) -> datetime:
+        pass
 
     @overload
-    def __getitem__(self, key: Literal["date"]) -> calendar_date: ...
+    def __getitem__(self, key: Literal["date"]) -> calendar_date:
+        pass
 
     @overload
-    def __getitem__(self, key: Literal["time"]) -> clock_time: ...
+    def __getitem__(self, key: Literal["time"]) -> clock_time:
+        pass
 
     @overload
-    def __getitem__(self, key: Literal["summary"]) -> str: ...
+    def __getitem__(self, key: Literal["summary"]) -> str:
+        pass
 
     @overload
-    def __getitem__(self, key: Literal["duration_hours"]) -> float: ...
+    def __getitem__(self, key: Literal["duration_hours"]) -> float:
+        pass
 
     def __getitem__(
         self,
@@ -376,7 +381,9 @@ def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
 
     print(f"Error: Unsupported calendar file type: {calendar_path.suffix or '<none>'}")
     print("Supported calendar exports are .icbu, .sqlitedb, .olm, .pst, and explicit Outlook .csv files.")
-    return raise_system_exit()
+    raise_system_exit()
+    msg = "unreachable"
+    raise AssertionError(msg)
 
 
 def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -1621,7 +1628,6 @@ def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calenda
     parquet_backed_up = False
     metadata_backed_up = False
     parquet_replaced = False
-    metadata_replaced = False
     try:
         dataframe_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path = _cache_metadata_path(dataframe_path)
@@ -1644,7 +1650,6 @@ def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calenda
         parquet_replaced = True
         parquet_temp_path = None
         metadata_temp_path.replace(metadata_path)
-        metadata_replaced = True
         metadata_temp_path = None
     except (OSError, pl.exceptions.PolarsError) as error:
         _restore_cache_rewrite_backup(
@@ -1657,7 +1662,7 @@ def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calenda
             _cache_metadata_path(dataframe_path),
             metadata_backup_path,
             backed_up=metadata_backed_up,
-            replaced=metadata_replaced,
+            replaced=False,
         )
         print(f"Error saving Polars DataFrame: {error}")
         raise_system_exit()

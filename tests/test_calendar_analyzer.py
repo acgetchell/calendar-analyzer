@@ -1786,7 +1786,7 @@ def test_meeting_supports_legacy_mapping_access() -> None:
     assert meeting["duration_hours"] == 1.5
     unknown_key: Any = "unknown"
     with pytest.raises(KeyError):
-        meeting[unknown_key]
+        _ = meeting[unknown_key]
 
 
 @pytest.mark.parametrize(
