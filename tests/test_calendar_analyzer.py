@@ -902,6 +902,20 @@ def test_load_calendar_dataframe_tracks_icbu_sqlite_metadata(capsys, tmp_path: P
     assert f"Found SQLite database in ICBU backup: {sqlite_path}" in capsys.readouterr().out
 
 
+def test_user_cache_directory_uses_windows_locations(monkeypatch, tmp_path: Path) -> None:
+    """Test Windows cache paths prefer LOCALAPPDATA and fall back to the user profile."""
+    local_app_data = tmp_path / "LocalAppData"
+    home = tmp_path / "home"
+    monkeypatch.setattr(calendar_analyzer.sys, "platform", "win32")
+    monkeypatch.setattr(calendar_analyzer.Path, "home", lambda: home)
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    assert calendar_analyzer._user_cache_directory() == local_app_data / "calendar-analyzer"  # noqa: SLF001
+
+    monkeypatch.delenv("LOCALAPPDATA")
+    assert calendar_analyzer._user_cache_directory() == home / "AppData" / "Local" / "calendar-analyzer"  # noqa: SLF001
+
+
 def test_main_reimports_when_saved_dataframe_is_corrupt(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test a corrupt saved DataFrame is rebuilt when the calendar source is available."""
     calendar_path = Path(
@@ -1027,6 +1041,125 @@ def test_main_exits_for_saved_dataframe_missing_columns(monkeypatch, capsys, tmp
     assert "No calendar files found" not in out
 
 
+def test_main_exits_for_saved_dataframe_with_inconsistent_meeting_row(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test cache-only runs reject rows whose derived meeting fields disagree."""
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    pl.read_parquet(dataframe_path).with_columns(
+        pl.lit(datetime(2023, 7, 2, tzinfo=UTC).date()).cast(pl.Date).alias("date")
+    ).write_parquet(dataframe_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame: meeting row 1 date" in out
+    assert "does not match start" in out
+    assert "No calendar files found" not in out
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda frame: frame.with_columns(pl.lit("").alias("summary")),
+            "invalid summary: ''",
+        ),
+        (
+            lambda frame: frame.with_columns(pl.lit(0.0).alias("duration_hours")),
+            "invalid duration_hours: 0.0",
+        ),
+        (
+            lambda frame: frame.with_columns(pl.lit(float("nan")).alias("duration_hours")),
+            "invalid duration_hours: nan",
+        ),
+        (
+            lambda frame: frame.with_columns(
+                pl.lit(datetime(2023, 7, 1, 11, 0, tzinfo=UTC).time()).cast(pl.Time).alias("time")
+            ),
+            "time datetime.time(11, 0) does not match start",
+        ),
+    ],
+)
+def test_main_exits_for_saved_dataframe_with_invalid_meeting_values(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    """Test cache-only runs reject invalid row values beyond schema shape."""
+    calendar_path = Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Cached Meeting",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    )
+    dataframe_path = tmp_path / "meetings.parquet"
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    mutation(pl.read_parquet(dataframe_path)).write_parquet(dataframe_path)
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "calendar-analyzer",
+            "--dataframe",
+            str(dataframe_path),
+            "--start-date",
+            "2023-06-30",
+            "--end-date",
+            "2023-07-03",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.main()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error reading saved Polars DataFrame: meeting row 1" in out
+    assert message in out
+    assert "No calendar files found" not in out
+
+
 def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatch, capsys, tmp_path: Path) -> None:
     """Test failed cache rewrites keep the previous readable DataFrame."""
     calendar_path = tmp_path / "calendar.sqlitedb"
@@ -1073,6 +1206,69 @@ def test_write_meetings_dataframe_preserves_existing_cache_on_failure(monkeypatc
     assert [row["summary"] for row in rows] == ["Original Cache"]
 
 
+def test_write_meetings_dataframe_restores_cache_when_metadata_replace_fails(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    """Test cache rewrites restore old files if sidecar replacement fails."""
+    calendar_path = tmp_path / "calendar.sqlitedb"
+    dataframe_path = tmp_path / "meetings.parquet"
+    metadata_path = dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json")
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Original Cache",
+                    datetime(2023, 7, 1, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 1, 18, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
+    calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+    original_metadata = metadata_path.read_text(encoding="utf-8")
+    calendar_path.unlink()
+    Path(
+        create_temp_sqlite_calendar(
+            [
+                (
+                    "Replacement Cache",
+                    datetime(2023, 7, 2, 17, 0, tzinfo=UTC),
+                    datetime(2023, 7, 2, 19, 0, tzinfo=UTC),
+                    0,
+                )
+            ]
+        )
+    ).replace(calendar_path)
+    real_replace = Path.replace
+    failed_metadata_replace = False
+
+    def fail_metadata_replace(self: Path, target: str | Path) -> Path:
+        nonlocal failed_metadata_replace
+        if (
+            not failed_metadata_replace
+            and self.name.startswith(f".{metadata_path.name}.")
+            and Path(target) == metadata_path
+        ):
+            failed_metadata_replace = True
+            message = "simulated metadata replace failure"
+            raise OSError(message)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_metadata_replace)
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path, force_import=True)
+
+    assert exc_info.value.code == 1
+    assert "Error saving Polars DataFrame: simulated metadata replace failure" in capsys.readouterr().out
+    rows = list(pl.read_parquet(dataframe_path).iter_rows(named=True))
+    assert [row["summary"] for row in rows] == ["Original Cache"]
+    assert metadata_path.read_text(encoding="utf-8") == original_metadata
+
+
 def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path: Path) -> None:
     """Test cached DataFrames are rebuilt when sidecar metadata is unusable."""
     dataframe_path = tmp_path / "meetings.parquet"
@@ -1086,6 +1282,20 @@ def test_load_calendar_dataframe_rebuilds_bad_or_stale_metadata(capsys, tmp_path
     assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
 
     metadata_path.write_text(json.dumps({"schema_version": 0}), encoding="utf-8")
+    assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
+    assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
+
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema_version": str(calendar_analyzer.CACHE_SCHEMA_VERSION),
+                "source_path": str(calendar_path.resolve()),
+                "source_mtime_ns": calendar_path.stat().st_mtime_ns,
+                "source_size": calendar_path.stat().st_size,
+            }
+        ),
+        encoding="utf-8",
+    )
     assert calendar_analyzer.load_calendar_dataframe(calendar_path, dataframe_path).is_empty()
     assert f"Saved Polars DataFrame is stale or from another calendar: {dataframe_path}" in capsys.readouterr().out
 
@@ -1123,6 +1333,84 @@ def test_cache_metadata_handles_unstatable_calendar_source(monkeypatch, tmp_path
     assert metadata["source_path"] == str(calendar_path.resolve())
     assert metadata["source_mtime_ns"] is None
     assert metadata["source_size"] is None
+
+
+def test_cached_dataframe_is_unusable_when_calendar_source_cannot_resolve(monkeypatch, tmp_path: Path) -> None:
+    """Test unreadable requested calendar paths make a saved cache unusable."""
+    dataframe_path = tmp_path / "meetings.parquet"
+    dataframe_path.write_bytes(b"parquet placeholder")
+    dataframe_path.with_suffix(f"{dataframe_path.suffix}.metadata.json").write_text(
+        json.dumps(
+            {
+                "schema_version": calendar_analyzer.CACHE_SCHEMA_VERSION,
+                "source_path": str(tmp_path / "calendar.sqlitedb"),
+                "source_mtime_ns": None,
+                "source_size": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def raise_source_error(_calendar_path: Path) -> NoReturn:
+        message = "unreadable"
+        raise OSError(message)
+
+    monkeypatch.setattr("calendar_analyzer._resolve_calendar_source_path", raise_source_error)
+
+    assert not calendar_analyzer._cached_dataframe_is_usable(dataframe_path, tmp_path / "calendar.sqlitedb")  # noqa: SLF001
+
+
+def test_metadata_matches_calendar_handles_unresolvable_calendar_source(monkeypatch, tmp_path: Path) -> None:
+    """Test metadata comparison rejects paths that cannot be resolved."""
+    calendar_path = tmp_path / "calendar.sqlitedb"
+    metadata = calendar_analyzer.CacheMetadata(
+        schema_version=calendar_analyzer.CACHE_SCHEMA_VERSION,
+        source_path=str(calendar_path),
+        source_mtime_ns=None,
+        source_size=None,
+    )
+
+    def raise_source_error(_calendar_path: Path) -> NoReturn:
+        message = "unreadable"
+        raise OSError(message)
+
+    monkeypatch.setattr("calendar_analyzer._resolve_calendar_source_path", raise_source_error)
+
+    assert not calendar_analyzer._metadata_matches_calendar(metadata, calendar_path)  # noqa: SLF001
+
+
+def test_metadata_matches_calendar_handles_unstatable_resolved_source(monkeypatch, tmp_path: Path) -> None:
+    """Test metadata comparison rejects matching paths when stat fails."""
+
+    class UnstatablePath:
+        """Path-like test double that cannot be statted."""
+
+        def __str__(self) -> str:
+            return "/calendar.sqlitedb"
+
+        def stat(self) -> object:
+            message = "unstatable"
+            raise OSError(message)
+
+    unstatable_path = UnstatablePath()
+    monkeypatch.setattr("calendar_analyzer._resolve_calendar_source_path", lambda _path: unstatable_path)
+    metadata = calendar_analyzer.CacheMetadata(
+        schema_version=calendar_analyzer.CACHE_SCHEMA_VERSION,
+        source_path=str(unstatable_path),
+        source_mtime_ns=None,
+        source_size=None,
+    )
+
+    assert not calendar_analyzer._metadata_matches_calendar(metadata, tmp_path / "calendar.sqlitedb")  # noqa: SLF001
+
+
+def test_date_range_overlap_accepts_unknown_data_bounds() -> None:
+    """Test cache prompt range checks accept saved data without coverage bounds."""
+    period_start = datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC)
+    period_end = datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC)
+
+    assert calendar_analyzer._date_range_overlaps_data(period_start, period_end, None, period_start.date())  # noqa: SLF001
+    assert calendar_analyzer._date_range_overlaps_data(period_start, period_end, period_start.date(), None)  # noqa: SLF001
 
 
 def test_main_supports_text_only_stdout(monkeypatch) -> None:
@@ -1339,6 +1627,195 @@ def test_generate_summary_shows_imported_coverage_and_query_range() -> None:
     assert "Query Date Range:" in result
     assert "- From: July 01, 2023" in result
     assert "- To:   July 31, 2023" in result
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"num_titles": 0}, "num_titles must be positive"),
+        ({"num_times": 0}, "num_times must be positive"),
+        (
+            {
+                "period_start": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC),
+                "period_end": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC),
+            },
+            "period_end cannot be before period_start",
+        ),
+        (
+            {
+                "data_start": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "data_end": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            },
+            "data_end cannot be before data_start",
+        ),
+    ],
+)
+def test_summary_options_reject_invalid_invariants(options: dict[str, Any], message: str) -> None:
+    """Test summary display options carry validated invariants."""
+    with pytest.raises(ValueError, match=message):
+        calendar_analyzer.SummaryOptions(**options)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error", "message"),
+    [
+        ({"schema_version": True}, TypeError, "schema_version must be an integer"),
+        ({"source_path": ""}, ValueError, "source_path must be a non-empty string"),
+        ({"source_mtime_ns": "soon"}, TypeError, "source_mtime_ns must be an integer or null"),
+        ({"source_size": "large"}, TypeError, "source_size must be an integer or null"),
+        ({"data_start": "2023-07-01"}, TypeError, "data_start must be a date or null"),
+        ({"data_end": "2023-07-02"}, TypeError, "data_end must be a date or null"),
+        (
+            {
+                "data_start": datetime(2023, 7, 2, tzinfo=calendar_analyzer.PACIFIC).date(),
+                "data_end": datetime(2023, 7, 1, tzinfo=calendar_analyzer.PACIFIC).date(),
+            },
+            ValueError,
+            "data_end cannot be before data_start",
+        ),
+    ],
+)
+def test_cache_metadata_rejects_invalid_invariants(
+    kwargs: dict[str, Any],
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    """Test parsed cache metadata cannot store invalid sidecar values."""
+    values: dict[str, Any] = {
+        "schema_version": calendar_analyzer.CACHE_SCHEMA_VERSION,
+        "source_path": "/calendar.sqlitedb",
+        "source_mtime_ns": None,
+        "source_size": None,
+    }
+    values.update(kwargs)
+
+    with pytest.raises(expected_error, match=message):
+        calendar_analyzer.CacheMetadata(**values)
+
+
+@pytest.mark.parametrize(
+    ("raw_metadata", "expected_error", "message"),
+    [
+        ([], TypeError, "cache metadata must be a JSON object"),
+        (
+            {
+                "schema_version": "1",
+                "source_path": "/calendar.sqlitedb",
+                "source_mtime_ns": None,
+                "source_size": None,
+            },
+            TypeError,
+            "schema_version must be an integer",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "source_path": "/calendar.sqlitedb",
+                "source_mtime_ns": None,
+                "source_size": None,
+                "data_start": 20230701,
+            },
+            TypeError,
+            "data_start must be an ISO date string or null",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "source_path": "/calendar.sqlitedb",
+                "source_mtime_ns": None,
+                "source_size": None,
+                "data_start": "not-a-date",
+            },
+            ValueError,
+            "data_start must be an ISO date string",
+        ),
+    ],
+)
+def test_cache_metadata_from_raw_rejects_malformed_fields(
+    raw_metadata: object,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    """Test raw JSON cache metadata is parsed before use."""
+    with pytest.raises(expected_error, match=message):
+        calendar_analyzer.CacheMetadata.from_raw(raw_metadata)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"summary": "", "duration_hours": 1.0},
+            "Meeting summary must be a non-empty string",
+        ),
+        (
+            {"summary": "Bad Duration", "duration_hours": 0.0},
+            "Meeting duration_hours must be positive and finite",
+        ),
+        (
+            {"summary": "Bad Duration", "duration_hours": float("nan")},
+            "Meeting duration_hours must be positive and finite",
+        ),
+    ],
+)
+def test_meeting_rejects_invalid_invariants(kwargs: dict[str, Any], message: str) -> None:
+    """Test validated meeting objects cannot store invalid domain values."""
+    with pytest.raises(ValueError, match=message):
+        calendar_analyzer.Meeting(
+            start=datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC),
+            **kwargs,
+        )
+
+
+def test_meeting_rejects_invalid_start_type() -> None:
+    """Test meeting start must already be parsed into a datetime."""
+    invalid_start: Any = "2023-07-01"
+    with pytest.raises(TypeError, match="Meeting start must be a datetime"):
+        calendar_analyzer.Meeting(start=invalid_start, summary="Bad Start", duration_hours=1.0)
+
+
+def test_meeting_supports_legacy_mapping_access() -> None:
+    """Test validated meetings keep the old mapping-style read contract."""
+    start = datetime(2023, 7, 1, 17, 0, tzinfo=UTC)
+    meeting = calendar_analyzer.Meeting(start=start, summary="Planning", duration_hours=1.5)
+
+    assert meeting["start"] == start
+    assert meeting["date"] == datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).date()
+    assert meeting["time"] == datetime(2023, 7, 1, 10, 0, tzinfo=calendar_analyzer.PACIFIC).time()
+    assert meeting["summary"] == "Planning"
+    assert meeting["duration_hours"] == 1.5
+    unknown_key: Any = "unknown"
+    with pytest.raises(KeyError):
+        _ = meeting[unknown_key]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_error", "message"),
+    [
+        ("start", "2023-07-01T10:00:00", TypeError, "invalid start"),
+        ("date", "2023-07-01", TypeError, "invalid date"),
+        ("time", "10:00:00", TypeError, "invalid time"),
+    ],
+)
+def test_validate_meetings_frame_rejects_unparsed_temporal_fields(
+    field_name: str,
+    value: object,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    """Test normalized frames reject temporal fields that were not parsed."""
+    start = datetime(2023, 7, 1, 10, 0, tzinfo=UTC)
+    row: dict[str, object] = {
+        "start": start,
+        "date": start.date(),
+        "time": start.time(),
+        "summary": "Planning",
+        "duration_hours": 1.0,
+    }
+    row[field_name] = value
+
+    with pytest.raises(expected_error, match=message):
+        calendar_analyzer._validate_meetings_frame(pl.DataFrame([row], orient="row"))  # noqa: SLF001
 
 
 def test_analyze_calendar_date_filtering() -> None:
@@ -2050,6 +2527,30 @@ def test_analyze_calendar_errors_when_olm_split_start_time_invalid(capsys) -> No
     assert "not-a-time" in out
 
 
+def test_analyze_calendar_errors_when_olm_iso_start_invalid(capsys) -> None:
+    """Test malformed combined OLM ISO datetimes are reported as parse errors."""
+    calendar_xml = textwrap.dedent("""
+    <appointments>
+      <appointment>
+        <OPFCalendarEventCopySummary>Broken ISO Date</OPFCalendarEventCopySummary>
+        <OPFCalendarEventCopyStartTime>2023-13-01T10:00:00</OPFCalendarEventCopyStartTime>
+      </appointment>
+    </appointments>
+    """)
+    tmp_path = create_temp_olm_file(calendar_xml)
+
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            calendar_analyzer.analyze_calendar(Path(tmp_path))
+    finally:
+        Path(tmp_path).unlink()
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing OLM calendar: Could not parse any OLM appointment start dates." in out
+    assert "2023-13-01T10:00:00" in out
+
+
 def test_analyze_calendar_with_explicit_outlook_csv_file() -> None:
     """Test explicit Outlook CSV calendar analysis remains supported."""
     with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", encoding="utf-8", newline="", delete=False) as tmp:
@@ -2154,6 +2655,25 @@ def test_analyze_calendar_outlook_csv_errors_when_combined_start_does_not_parse(
     out = capsys.readouterr().out
     assert "Error parsing Outlook CSV calendar: Could not parse any Outlook CSV start dates." in out
     assert "not-a-date 10:00 AM" in out
+
+
+def test_outlook_csv_start_datetime_skips_non_meeting_rows() -> None:
+    """Test CSV start parsing skips rows that Outlook marks as all-day blocks."""
+    row = {
+        "Subject": "All Day",
+        "Start Date": "07/01/2023",
+        "Start Time": "10:00 AM",
+        "All day event": "True",
+    }
+
+    assert calendar_analyzer._outlook_csv_start_datetime(row) is None  # noqa: SLF001
+
+
+def test_outlook_csv_start_diagnostics_reports_lone_start_time() -> None:
+    """Test CSV parse diagnostics include orphaned time fields."""
+    row = {"Start Time": "10:00 AM"}
+
+    assert calendar_analyzer._outlook_csv_start_value_for_diagnostics(row) == "10:00 AM"  # noqa: SLF001
 
 
 def test_analyze_calendar_filters_requested_outlook_csv_range(tmp_path: Path) -> None:
@@ -2278,6 +2798,34 @@ def test_analyze_calendar_outlook_csv_defaults_malformed_split_end(tmp_path: Pat
     assert [meeting["summary"] for meeting in meetings] == ["Default End"]
 
 
+def test_outlook_datetime_accepts_date_only_when_time_is_optional() -> None:
+    """Test Outlook date parsing accepts date-only values outside timed start fields."""
+    assert calendar_analyzer._outlook_datetime("2023-07-01") == datetime(  # noqa: SLF001
+        2023,
+        7,
+        1,
+        tzinfo=calendar_analyzer.PACIFIC,
+    )
+
+
+def test_parse_outlook_iso_datetime_assumes_naive_values_are_pacific() -> None:
+    """Test ISO fallback parsing keeps naive Outlook timestamps in Pacific time."""
+    assert calendar_analyzer._parse_outlook_iso_datetime("2023-07-01T10:30") == datetime(  # noqa: SLF001
+        2023,
+        7,
+        1,
+        10,
+        30,
+        tzinfo=calendar_analyzer.PACIFIC,
+    )
+
+
+def test_fallback_date_text_requires_a_date() -> None:
+    """Test fallback date conversion is only called after a date exists."""
+    with pytest.raises(ValueError, match="Fallback date is required"):
+        calendar_analyzer._fallback_date_text(None)  # noqa: SLF001
+
+
 def test_analyze_calendar_defaults_missing_sqlite_summary() -> None:
     """Test SQLite rows use the default title when summary is empty."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2305,6 +2853,27 @@ def test_analyze_calendar_defaults_missing_sqlite_summary() -> None:
 
         assert stats == {"total_meetings": 1, "total_hours": 1.0}
         assert meetings[0]["summary"] == "No Title"
+
+
+def test_analyze_calendar_sqlite_reports_malformed_date_rows(capsys, tmp_path: Path) -> None:
+    """Test malformed Apple SQLite date fields produce a user-facing parse error."""
+    sqlite_path = tmp_path / "calendar.sqlitedb"
+    with closing(sqlite3.connect(sqlite_path)) as conn:
+        conn.execute("CREATE TABLE CalendarItem (summary TEXT, start_date INTEGER, end_date INTEGER)")
+        conn.execute(
+            "INSERT INTO CalendarItem (summary, start_date, end_date) VALUES (?, ?, ?)",
+            ("Broken Date Meeting", None, 1),
+        )
+        conn.commit()
+
+    with pytest.raises(SystemExit) as exc_info:
+        calendar_analyzer.analyze_calendar(sqlite_path)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Error parsing SQLite calendar:" in out
+    assert "Broken Date Meeting" in out
+    assert "invalid start_date: None" in out
 
 
 def test_analyze_calendar_sqlite_read_error(capsys) -> None:
@@ -2339,6 +2908,14 @@ def test_analyze_calendar_icbu_no_calendar_data(capsys) -> None:
         assert "Contents of ICBU directory:" in out
         assert "other_file.txt" in out
         assert "metadata.plist" in out
+
+
+def test_resolve_calendar_source_path_keeps_icbu_without_sqlite(tmp_path: Path) -> None:
+    """Test cache metadata can still refer to an ICBU directory before import validates it."""
+    icbu_path = tmp_path / "backup.icbu"
+    icbu_path.mkdir()
+
+    assert calendar_analyzer._resolve_calendar_source_path(icbu_path) == icbu_path.resolve()  # noqa: SLF001
 
 
 def test_analyze_calendar_icbu_directory_listing_error(capsys) -> None:

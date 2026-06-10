@@ -6,6 +6,7 @@ import argparse
 import csv
 import importlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -14,9 +15,9 @@ import tempfile
 import zipfile
 from contextlib import closing, suppress
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date as calendar_date, datetime, time as clock_time, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, overload
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -54,14 +55,77 @@ OUTLOOK_DATETIME_FORMATS = (
 )
 
 
-class Meeting(TypedDict):
-    """Normalized calendar meeting data used for reporting."""
+@dataclass(frozen=True, slots=True)
+class Meeting:
+    """Validated calendar meeting data used for reporting."""
 
     start: datetime
-    date: date
-    time: time
     summary: str
     duration_hours: float
+
+    def __post_init__(self) -> None:
+        """Validate invariant-bearing meeting fields."""
+        if not isinstance(self.start, datetime):
+            msg = f"Meeting start must be a datetime, got {self.start!r}"
+            raise TypeError(msg)
+        if not isinstance(self.summary, str) or not self.summary:
+            msg = f"Meeting summary must be a non-empty string, got {self.summary!r}"
+            raise ValueError(msg)
+        if (
+            isinstance(self.duration_hours, bool)
+            or not isinstance(self.duration_hours, int | float)
+            or not math.isfinite(self.duration_hours)
+            or self.duration_hours <= 0
+        ):
+            msg = f"Meeting duration_hours must be positive and finite, got {self.duration_hours!r}"
+            raise ValueError(msg)
+
+    @property
+    def date(self) -> calendar_date:
+        """Return the Pacific calendar date derived from the validated start."""
+        return convert_to_pacific(self.start).date()
+
+    @property
+    def time(self) -> clock_time:
+        """Return the Pacific local time derived from the validated start."""
+        return convert_to_pacific(self.start).time()
+
+    @overload
+    def __getitem__(self, key: Literal["start"]) -> datetime:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["date"]) -> calendar_date:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["time"]) -> clock_time:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["summary"]) -> str:
+        pass
+
+    @overload
+    def __getitem__(self, key: Literal["duration_hours"]) -> float:
+        pass
+
+    def __getitem__(
+        self,
+        key: Literal["start", "date", "time", "summary", "duration_hours"],
+    ) -> datetime | calendar_date | clock_time | str | float:
+        """Return fields by legacy mapping-style keys."""
+        if key == "start":
+            return self.start
+        if key == "date":
+            return self.date
+        if key == "time":
+            return self.time
+        if key == "summary":
+            return self.summary
+        if key == "duration_hours":
+            return self.duration_hours
+        raise KeyError(key)
 
 
 @dataclass(frozen=True)
@@ -72,12 +136,132 @@ class SummaryOptions:
     num_times: int = 5
     period_start: datetime | None = None
     period_end: datetime | None = None
-    data_start: date | None = None
-    data_end: date | None = None
+    data_start: calendar_date | None = None
+    data_end: calendar_date | None = None
     include_data_coverage: bool = True
 
+    def __post_init__(self) -> None:
+        """Validate display option invariants."""
+        if self.num_titles <= 0:
+            msg = f"num_titles must be positive, got {self.num_titles!r}"
+            raise ValueError(msg)
+        if self.num_times <= 0:
+            msg = f"num_times must be positive, got {self.num_times!r}"
+            raise ValueError(msg)
+        if self.period_start is not None and self.period_end is not None and self.period_end < self.period_start:
+            msg = "period_end cannot be before period_start"
+            raise ValueError(msg)
+        if self.data_start is not None and self.data_end is not None and self.data_end < self.data_start:
+            msg = "data_end cannot be before data_start"
+            raise ValueError(msg)
 
-SqliteCalendarRow = tuple[str | None, int, int, Any]
+
+@dataclass(frozen=True, slots=True)
+class CacheMetadata:
+    """Validated sidecar metadata for a saved meeting DataFrame."""
+
+    schema_version: int
+    source_path: str
+    source_mtime_ns: int | None
+    source_size: int | None
+    data_start: calendar_date | None = None
+    data_end: calendar_date | None = None
+
+    def __post_init__(self) -> None:
+        """Validate cache metadata fields parsed from JSON."""
+        if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int):
+            msg = f"cache metadata schema_version must be an integer, got {self.schema_version!r}"
+            raise TypeError(msg)
+        if not isinstance(self.source_path, str) or not self.source_path:
+            msg = f"cache metadata source_path must be a non-empty string, got {self.source_path!r}"
+            raise ValueError(msg)
+        if self.source_mtime_ns is not None and (
+            isinstance(self.source_mtime_ns, bool) or not isinstance(self.source_mtime_ns, int)
+        ):
+            msg = f"cache metadata source_mtime_ns must be an integer or null, got {self.source_mtime_ns!r}"
+            raise TypeError(msg)
+        if self.source_size is not None and (
+            isinstance(self.source_size, bool) or not isinstance(self.source_size, int)
+        ):
+            msg = f"cache metadata source_size must be an integer or null, got {self.source_size!r}"
+            raise TypeError(msg)
+        if self.data_start is not None and not isinstance(self.data_start, calendar_date):
+            msg = f"cache metadata data_start must be a date or null, got {self.data_start!r}"
+            raise TypeError(msg)
+        if self.data_end is not None and not isinstance(self.data_end, calendar_date):
+            msg = f"cache metadata data_end must be a date or null, got {self.data_end!r}"
+            raise TypeError(msg)
+        if self.data_start is not None and self.data_end is not None and self.data_end < self.data_start:
+            msg = "cache metadata data_end cannot be before data_start"
+            raise ValueError(msg)
+
+    @classmethod
+    def from_raw(cls, raw_metadata: object) -> CacheMetadata:
+        """Parse raw JSON metadata into validated cache metadata."""
+        if not isinstance(raw_metadata, dict):
+            msg = f"cache metadata must be a JSON object, got {raw_metadata!r}"
+            raise TypeError(msg)
+        metadata_values: dict[str, object] = {key: value for key, value in raw_metadata.items() if isinstance(key, str)}
+        return cls(
+            schema_version=_parse_metadata_int(metadata_values.get("schema_version"), "schema_version"),
+            source_path=_parse_metadata_source_path(metadata_values.get("source_path")),
+            source_mtime_ns=_parse_optional_metadata_int(metadata_values.get("source_mtime_ns"), "source_mtime_ns"),
+            source_size=_parse_optional_metadata_int(metadata_values.get("source_size"), "source_size"),
+            data_start=_parse_optional_metadata_date(metadata_values.get("data_start"), "data_start"),
+            data_end=_parse_optional_metadata_date(metadata_values.get("data_end"), "data_end"),
+        )
+
+    def to_json(self) -> str:
+        """Return cache metadata as deterministic JSON sidecar text."""
+        metadata = {
+            "schema_version": self.schema_version,
+            "source_path": self.source_path,
+            "source_mtime_ns": self.source_mtime_ns,
+            "source_size": self.source_size,
+            "data_start": self.data_start.isoformat() if self.data_start is not None else None,
+            "data_end": self.data_end.isoformat() if self.data_end is not None else None,
+        }
+        return json.dumps(metadata, indent=2, sort_keys=True)
+
+
+def _parse_metadata_int(value: object, field_name: str) -> int:
+    """Parse an integer field from cache metadata."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"cache metadata {field_name} must be an integer, got {value!r}"
+        raise TypeError(msg)
+    return value
+
+
+def _parse_optional_metadata_int(value: object, field_name: str) -> int | None:
+    """Parse an optional integer field from cache metadata."""
+    if value is None:
+        return None
+    return _parse_metadata_int(value, field_name)
+
+
+def _parse_metadata_source_path(value: object) -> str:
+    """Parse the source path field from cache metadata."""
+    if not isinstance(value, str) or not value:
+        msg = f"cache metadata source_path must be a non-empty string, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+def _parse_optional_metadata_date(value: object, field_name: str) -> calendar_date | None:
+    """Parse an optional ISO date from cache metadata."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        msg = f"cache metadata {field_name} must be an ISO date string or null, got {value!r}"
+        raise TypeError(msg)
+    try:
+        return calendar_date.fromisoformat(value)
+    except ValueError as error:
+        msg = f"cache metadata {field_name} must be an ISO date string, got {value!r}"
+        raise ValueError(msg) from error
+
+
+SqliteCalendarRow = tuple[str | None, Any, Any, Any]
 
 
 class SavedDataFrameReadError(RuntimeError):
@@ -197,7 +381,9 @@ def import_calendar_meetings(calendar_path: Path) -> list[Meeting]:
 
     print(f"Error: Unsupported calendar file type: {calendar_path.suffix or '<none>'}")
     print("Supported calendar exports are .icbu, .sqlitedb, .olm, .pst, and explicit Outlook .csv files.")
-    raise SystemExit(1)
+    raise_system_exit()
+    msg = "unreachable"
+    raise AssertionError(msg)
 
 
 def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -205,11 +391,13 @@ def _import_sqlite_calendar_meetings(calendar_path: Path) -> list[Meeting]:
 
     try:
         rows = _fetch_sqlite_calendar_rows(calendar_path)
+        return _meetings_from_sqlite_rows(rows)
     except sqlite3.Error as error:
         print(f"Error reading SQLite calendar: {error}")
         raise_system_exit()
-
-    return _meetings_from_sqlite_rows(rows)
+    except (TypeError, ValueError) as error:
+        print(f"Error parsing SQLite calendar: {error}")
+        raise_system_exit()
 
 
 def _import_outlook_csv_calendar_meetings(calendar_path: Path) -> list[Meeting]:
@@ -383,13 +571,11 @@ def _meeting_from_outlook_appointment(item: Any) -> Meeting | None:
     if _is_all_day_like_calendar_block(start, duration_hours):
         return None
 
-    return {
-        "start": start,
-        "date": start.date(),
-        "time": start.time(),
-        "summary": str(getattr(item, "Subject", "") or "No Title"),
-        "duration_hours": duration_hours,
-    }
+    return Meeting(
+        start=start,
+        summary=str(getattr(item, "Subject", "") or "No Title"),
+        duration_hours=duration_hours,
+    )
 
 
 def _outlook_com_datetime(value: object) -> datetime | None:
@@ -566,7 +752,7 @@ def main() -> None:
 
 def raise_system_exit() -> NoReturn:
     """Exit with the conventional CLI failure status."""
-    sys.exit(1)
+    argparse.ArgumentParser(prog="calendar-analyzer").exit(1)
 
 
 def _resolve_requested_calendar_path(calendar_file: str | Path) -> Path:
@@ -614,7 +800,7 @@ def _cached_dataframe_is_usable(dataframe_path: Path, calendar_file: str | Path 
         return False
 
     metadata = _read_cache_metadata(dataframe_path)
-    if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:
+    if metadata is None or metadata.schema_version != CACHE_SCHEMA_VERSION:
         return False
 
     if calendar_file is None:
@@ -628,14 +814,14 @@ def _cached_dataframe_is_usable(dataframe_path: Path, calendar_file: str | Path 
     return _metadata_matches_calendar(metadata, calendar_path)
 
 
-def _metadata_matches_calendar(metadata: dict[str, object], calendar_path: Path) -> bool:
+def _metadata_matches_calendar(metadata: CacheMetadata, calendar_path: Path) -> bool:
     """Return whether saved DataFrame metadata matches a requested calendar source."""
     try:
         source_path = _resolve_calendar_source_path(calendar_path)
     except OSError:
         return False
 
-    if metadata.get("source_path") != str(source_path):
+    if metadata.source_path != str(source_path):
         return False
 
     try:
@@ -643,19 +829,17 @@ def _metadata_matches_calendar(metadata: dict[str, object], calendar_path: Path)
     except OSError:
         return False
 
-    return (
-        metadata.get("source_mtime_ns") == source_stat.st_mtime_ns
-        and metadata.get("source_size") == source_stat.st_size
-    )
+    return metadata.source_mtime_ns == source_stat.st_mtime_ns and metadata.source_size == source_stat.st_size
 
 
-def _read_cache_metadata(dataframe_path: Path) -> dict[str, object]:
-    """Read saved DataFrame sidecar metadata, returning an empty mapping when absent."""
+def _read_cache_metadata(dataframe_path: Path) -> CacheMetadata | None:
+    """Read and parse saved DataFrame sidecar metadata."""
     metadata_path = _cache_metadata_path(dataframe_path)
     try:
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        raw_metadata: object = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return CacheMetadata.from_raw(raw_metadata)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
 def _cache_metadata_path(dataframe_path: Path) -> Path:
@@ -673,7 +857,7 @@ def _print_frame_coverage(label: str, frame: pl.DataFrame) -> None:
     print(f"{label}: {_format_summary_date(start_date)} to {_format_summary_date(end_date)}")
 
 
-def _frame_date_bounds(frame: pl.DataFrame) -> tuple[date | None, date | None]:
+def _frame_date_bounds(frame: pl.DataFrame) -> tuple[calendar_date | None, calendar_date | None]:
     """Return the min and max dates covered by a normalized meeting DataFrame."""
     if frame.is_empty():
         return None, None
@@ -684,8 +868,8 @@ def _frame_date_bounds(frame: pl.DataFrame) -> tuple[date | None, date | None]:
 def _date_range_overlaps_data(
     period_start: datetime,
     period_end: datetime,
-    data_start: date | None,
-    data_end: date | None,
+    data_start: calendar_date | None,
+    data_end: calendar_date | None,
 ) -> bool:
     """Return whether a requested period overlaps saved meeting data coverage."""
     if data_start is None or data_end is None:
@@ -696,8 +880,8 @@ def _date_range_overlaps_data(
 def _print_prompt_range_error(
     period_start: datetime,
     period_end: datetime,
-    data_start: date | None,
-    data_end: date | None,
+    data_start: calendar_date | None,
+    data_end: calendar_date | None,
 ) -> None:
     """Print a clear error when prompt dates are outside cached data coverage."""
     print("Error: no cached meeting data overlaps the requested prompt date range.")
@@ -709,7 +893,7 @@ def _print_prompt_range_error(
     print("Refresh the cache with: calendar-analyzer --import")
 
 
-def _format_summary_date(value: date | None) -> str:
+def _format_summary_date(value: calendar_date | None) -> str:
     """Format an optional date for user-facing coverage output."""
     if value is None:
         return "No timed meetings"
@@ -802,12 +986,8 @@ def _resolve_date_range(
     return resolved_start_date, resolved_end_date
 
 
-def _fetch_sqlite_calendar_rows(
-    calendar_path: Path,
-    start_seconds: int | None = None,
-    end_seconds: int | None = None,
-) -> list[SqliteCalendarRow]:
-    """Fetch SQLite calendar rows, optionally in an Apple-epoch date range."""
+def _fetch_sqlite_calendar_rows(calendar_path: Path) -> list[SqliteCalendarRow]:
+    """Fetch SQLite calendar rows."""
     with closing(sqlite3.connect(calendar_path)) as conn:
         cursor = conn.cursor()
         all_day_column = _sqlite_all_day_column(cursor)
@@ -821,12 +1001,8 @@ def _fetch_sqlite_calendar_rows(
                 {all_day_expression}
             FROM CalendarItem
             """  # noqa: S608
-        parameters: tuple[int, int] | tuple[()] = ()
-        if start_seconds is not None and end_seconds is not None:
-            query += " WHERE start_date >= ? AND start_date <= ?"
-            parameters = (start_seconds, end_seconds)
         query += " ORDER BY start_date, summary"
-        cursor.execute(query, parameters)
+        cursor.execute(query)
         return cursor.fetchall()
 
 
@@ -853,23 +1029,28 @@ def _meetings_from_sqlite_rows(rows: Iterable[SqliteCalendarRow]) -> list[Meetin
         if _csv_truthy(str(is_all_day)):
             continue
 
-        start_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=start_seconds))
-        end_dt = convert_to_pacific(APPLE_EPOCH + timedelta(seconds=end_seconds))
+        title = summary or "No Title"
+        start_dt = convert_to_pacific(
+            APPLE_EPOCH + timedelta(seconds=_sqlite_calendar_seconds(start_seconds, "start_date", title))
+        )
+        end_dt = convert_to_pacific(
+            APPLE_EPOCH + timedelta(seconds=_sqlite_calendar_seconds(end_seconds, "end_date", title))
+        )
         duration_hours = _positive_duration_hours(start_dt, end_dt)
         if _is_all_day_like_calendar_block(start_dt, duration_hours):
             continue
 
-        meetings.append(
-            {
-                "start": start_dt,
-                "date": start_dt.date(),
-                "time": start_dt.time(),
-                "summary": summary or "No Title",
-                "duration_hours": duration_hours,
-            }
-        )
+        meetings.append(Meeting(start=start_dt, summary=title, duration_hours=duration_hours))
 
     return meetings
+
+
+def _sqlite_calendar_seconds(value: object, field_name: str, title: str) -> int | float:
+    """Return Apple-epoch seconds from a SQLite row or raise a parse error."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        msg = f"CalendarItem row {title!r} has invalid {field_name}: {value!r}"
+        raise TypeError(msg)
+    return value
 
 
 def _read_olm_appointments(calendar_path: Path) -> list[Element]:
@@ -927,13 +1108,11 @@ def _meetings_from_olm_appointments(appointments: Iterable[Element]) -> list[Mee
             continue
 
         meetings.append(
-            {
-                "start": start,
-                "date": start.date(),
-                "time": start.time(),
-                "summary": _xml_text(appointment, ("OPFCalendarEventCopySummary", "Subject", "Summary")) or "No Title",
-                "duration_hours": duration_hours,
-            }
+            Meeting(
+                start=start,
+                summary=_xml_text(appointment, ("OPFCalendarEventCopySummary", "Subject", "Summary")) or "No Title",
+                duration_hours=duration_hours,
+            )
         )
 
     if dated_appointments and dated_appointments == len(unparsable_start_values):
@@ -1131,13 +1310,11 @@ def _meetings_from_outlook_csv_rows(rows: Iterable[dict[str, str]]) -> list[Meet
             continue
 
         meetings.append(
-            {
-                "start": start,
-                "date": start.date(),
-                "time": start.time(),
-                "summary": _csv_value(row, ("Subject", "Title", "Summary")) or "No Title",
-                "duration_hours": duration_hours,
-            }
+            Meeting(
+                start=start,
+                summary=_csv_value(row, ("Subject", "Title", "Summary")) or "No Title",
+                duration_hours=duration_hours,
+            )
         )
 
     if not meetings and unparsable_start_values:
@@ -1311,7 +1488,7 @@ def _is_all_day_like_calendar_block(start: datetime, duration_hours: float) -> b
 
 def _starts_at_midnight(start: datetime) -> bool:
     """Return whether a datetime starts exactly at midnight."""
-    return start.timetz().replace(tzinfo=None) == time()
+    return start.timetz().replace(tzinfo=None) == clock_time()
 
 
 def _csv_value(row: dict[str, str], aliases: tuple[str, ...]) -> str | None:
@@ -1353,26 +1530,59 @@ def _is_non_meeting_free_busy(value: object) -> bool:
 def _meetings_dataframe(meetings: list[Meeting] | pl.DataFrame) -> pl.DataFrame:
     """Return normalized meetings as a Polars DataFrame with the reporting schema."""
     if isinstance(meetings, pl.DataFrame):
-        return meetings.select(list(MEETING_FRAME_SCHEMA)).cast(MEETING_FRAME_SCHEMA)
+        return _validate_meetings_frame(meetings.select(list(MEETING_FRAME_SCHEMA)).cast(MEETING_FRAME_SCHEMA))
 
     rows = [
         {
             "start": _meeting_local_start(meeting),
-            "date": meeting["date"],
-            "time": meeting["time"],
-            "summary": meeting["summary"],
-            "duration_hours": float(meeting["duration_hours"]),
+            "date": meeting.date,
+            "time": meeting.time,
+            "summary": meeting.summary,
+            "duration_hours": meeting.duration_hours,
         }
         for meeting in meetings
     ]
     if not rows:
         return pl.DataFrame(schema=MEETING_FRAME_SCHEMA)
-    return pl.DataFrame(rows, schema=MEETING_FRAME_SCHEMA, orient="row")
+    return _validate_meetings_frame(pl.DataFrame(rows, schema=MEETING_FRAME_SCHEMA, orient="row"))
 
 
 def _meeting_local_start(meeting: Meeting) -> datetime:
     """Return a Pacific local naive datetime for cache filtering."""
-    return _local_naive_datetime(meeting["start"])
+    return _local_naive_datetime(meeting.start)
+
+
+def _validate_meetings_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    """Return a normalized meeting frame after validating row invariants."""
+    for index, row in enumerate(frame.iter_rows(named=True), start=1):
+        start = row["start"]
+        meeting_date = row["date"]
+        meeting_time = row["time"]
+        summary = row["summary"]
+        duration_hours = row["duration_hours"]
+
+        if not isinstance(start, datetime):
+            msg = f"meeting row {index} has invalid start: {start!r}"
+            raise TypeError(msg)
+        if not isinstance(meeting_date, calendar_date):
+            msg = f"meeting row {index} has invalid date: {meeting_date!r}"
+            raise TypeError(msg)
+        if not isinstance(meeting_time, clock_time):
+            msg = f"meeting row {index} has invalid time: {meeting_time!r}"
+            raise TypeError(msg)
+        if not isinstance(summary, str) or not summary:
+            msg = f"meeting row {index} has invalid summary: {summary!r}"
+            raise ValueError(msg)
+        if not isinstance(duration_hours, int | float) or not math.isfinite(duration_hours) or duration_hours <= 0:
+            msg = f"meeting row {index} has invalid duration_hours: {duration_hours!r}"
+            raise ValueError(msg)
+        if meeting_date != start.date():
+            msg = f"meeting row {index} date {meeting_date!r} does not match start {start!r}"
+            raise ValueError(msg)
+        if meeting_time != start.time():
+            msg = f"meeting row {index} time {meeting_time!r} does not match start {start!r}"
+            raise ValueError(msg)
+    return frame
 
 
 def _local_naive_datetime(value: datetime) -> datetime:
@@ -1403,13 +1613,21 @@ def _read_meetings_dataframe(dataframe_path: Path) -> pl.DataFrame:
             f"Error reading saved Polars DataFrame: missing columns {sorted(missing_columns)}"
         )
 
-    return _meetings_dataframe(frame)
+    try:
+        return _meetings_dataframe(frame)
+    except (TypeError, ValueError, pl.exceptions.PolarsError) as error:
+        raise SavedDataFrameReadError(f"Error reading saved Polars DataFrame: {error}") from error
 
 
 def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calendar_path: Path) -> None:
     """Write normalized meetings and source metadata to disk."""
     parquet_temp_path: Path | None = None
     metadata_temp_path: Path | None = None
+    parquet_backup_path: Path | None = None
+    metadata_backup_path: Path | None = None
+    parquet_backed_up = False
+    metadata_backed_up = False
+    parquet_replaced = False
     try:
         dataframe_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path = _cache_metadata_path(dataframe_path)
@@ -1418,15 +1636,38 @@ def _write_meetings_dataframe(frame: pl.DataFrame, dataframe_path: Path, calenda
 
         frame.write_parquet(parquet_temp_path)
         metadata_temp_path.write_text(_cache_metadata(calendar_path, frame), encoding="utf-8")
+
+        if dataframe_path.exists():
+            parquet_backup_path = _temporary_sibling_path(dataframe_path)
+            dataframe_path.replace(parquet_backup_path)
+            parquet_backed_up = True
+        if metadata_path.exists():
+            metadata_backup_path = _temporary_sibling_path(metadata_path)
+            metadata_path.replace(metadata_backup_path)
+            metadata_backed_up = True
+
         parquet_temp_path.replace(dataframe_path)
+        parquet_replaced = True
         parquet_temp_path = None
         metadata_temp_path.replace(metadata_path)
         metadata_temp_path = None
     except (OSError, pl.exceptions.PolarsError) as error:
+        _restore_cache_rewrite_backup(
+            dataframe_path,
+            parquet_backup_path,
+            backed_up=parquet_backed_up,
+            replaced=parquet_replaced,
+        )
+        _restore_cache_rewrite_backup(
+            _cache_metadata_path(dataframe_path),
+            metadata_backup_path,
+            backed_up=metadata_backed_up,
+            replaced=False,
+        )
         print(f"Error saving Polars DataFrame: {error}")
         raise_system_exit()
     finally:
-        for temp_path in (parquet_temp_path, metadata_temp_path):
+        for temp_path in (parquet_temp_path, metadata_temp_path, parquet_backup_path, metadata_backup_path):
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
 
@@ -1440,6 +1681,22 @@ def _temporary_sibling_path(destination: Path) -> Path:
     )
     os.close(file_descriptor)
     return Path(temp_name)
+
+
+def _restore_cache_rewrite_backup(
+    destination: Path,
+    backup_path: Path | None,
+    *,
+    backed_up: bool,
+    replaced: bool,
+) -> None:
+    """Restore a cache file that was moved aside during an interrupted rewrite."""
+    if not backed_up and not replaced:
+        return
+    if destination.exists():
+        destination.unlink()
+    if backed_up and backup_path is not None and backup_path.exists():
+        backup_path.replace(destination)
 
 
 def _cache_metadata(calendar_path: Path, frame: pl.DataFrame) -> str:
@@ -1456,15 +1713,14 @@ def _cache_metadata(calendar_path: Path, frame: pl.DataFrame) -> str:
         source_size = source_stat.st_size
 
     data_start, data_end = _frame_date_bounds(frame)
-    metadata = {
-        "schema_version": CACHE_SCHEMA_VERSION,
-        "source_path": str(source_path),
-        "source_mtime_ns": source_mtime_ns,
-        "source_size": source_size,
-        "data_start": data_start.isoformat() if data_start is not None else None,
-        "data_end": data_end.isoformat() if data_end is not None else None,
-    }
-    return json.dumps(metadata, indent=2, sort_keys=True)
+    return CacheMetadata(
+        schema_version=CACHE_SCHEMA_VERSION,
+        source_path=str(source_path),
+        source_mtime_ns=source_mtime_ns,
+        source_size=source_size,
+        data_start=data_start,
+        data_end=data_end,
+    ).to_json()
 
 
 def _compile_title_exclusion_patterns(patterns: list[str] | None) -> list[re.Pattern[str]]:
@@ -1568,11 +1824,11 @@ def _parse_date_argument(value: str | None, label: str, *, end_of_day: bool = Fa
         raise_system_exit()
 
     try:
-        parsed_date = date.fromisoformat(value)
+        parsed_date = calendar_date.fromisoformat(value)
     except ValueError:
         print(f"Error: {label} date must be in YYYY-MM-DD format")
         raise_system_exit()
-    parsed_time = time.max if end_of_day else time.min
+    parsed_time = clock_time.max if end_of_day else clock_time.min
     return datetime.combine(parsed_date, parsed_time, tzinfo=PACIFIC)
 
 
